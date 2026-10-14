@@ -1,0 +1,88 @@
+https://winworldpc.com/download/73d5555e-c950-11ea-8b14-fa163e9022f0/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+4.1.3
+Language
+English
+Processor architecture
+x86
+File type
+CD
+File size
+10.51MB
+Checksum
+9a2a9fc94360beb851e0848453ea557a6c70e0ad
+https://winworldpc.com/download/c2bac2b5-0f42-c2a4-0611-c3a6e280947e/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+4.1.2
+Language
+English
+Processor architecture
+x86
+File type
+CD
+File size
+9.08MB
+Checksum
+299422ae0699a12b2419b2982c59360d76e5369769a2ab15f64463ee27e9449ee2a76670b788acc5b9e6c5e4593fe6f8b5ad47880471a5d83fa656e9e719ed79
+Concurrent CPM-86 1.0 [IBM PC] (5.25-160k)
+https://winworldpc.com/download/c2ae43c3-9cc3-b1c3-98c2-b211c3a5c28f/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+1.0 [IBM PC]
+Language
+English
+Processor architecture
+x86
+File type
+5¼ Floppy
+File size
+110.48KB
+Checksum
+6c52e18bc2c4aa86847b7107933c5b96660b9d987008ff78e2c3d682200beeb2232cf51432fc9cc91ffa2f7f8cfe036bc51ed7d8c7267304b8233d3490ca6e93
+Concurrent CPM-86 1.x Manual
+https://winworldpc.com/download/c2b035c5-a150-c398-c2b2-11c3a5c28f13/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+1.x
+Language
+English
+Processor architecture
+x86
+File type
+Document
+File size
+19.85MB
+Checksum
+9ab674cadc45a71071641111e2131bfd52dd7755fe082a85372ce852c4ed587d53102712ce0b446da2fafc3c08b1c5ae7eb80e22c029689aa030d7ca5b47f295
+Digital Research Concurrent PC DOS 3.2
+https://winworldpc.com/download/c397c692-c398-cb9c-c2a6-5b11c3a4c2ac/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+3.2
+Language
+English
+Processor architecture
+x86
+File type
+5¼ Floppy
+File size
+411.66KB
+Checksum
+f869865eae24fc1530a0b360e9a54874a6a6f4eed998c81ca4a881b9301b42584b9d0857b5b231028549639b51c6a7f41da2837ecb9640cad3f987de86efa2b5
+Digital Research Concurrent PC DOS 3.2 Maintenance Release
+https://winworldpc.com/download/c3a3e280-b0c5-a11a-c2a6-5c11c3a4c2ac/from/c3ae6ee2-8099-713d-3411-c3a6e280947e
+File Information
+Version
+3.2 Maintenance Release
+Language
+English
+Processor architecture
+x86
+File type
+5¼ Floppy
+File size
+412.3KB
+Checksum
+b5eba16f27b9856381261d57b3af55baae88acaec188b93edc6e91831a9b0816ddd360c77d866bcbed8dfcb9e1080838301413d79fb3c55476421dfc87ff5d1c
