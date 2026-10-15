@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-LunaStore Client XP Edition - Product v1.0
+LunaStore Client XP Edition - Product v1.1
 Windows XP SP3 | Python 3.4 | Tkinter
 Функции: JWT + auto-refresh, DPAPI-шифрование сессии, поиск,
-категории, иконки с кэшем, скачивание, авто-восстановление сессии.
+категории, иконки с кэшем, скачивание с прогрессом, настройки,
+расширенная карточка приложения, TLS-диагностика.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import json
 import os
 import sys
@@ -41,11 +42,13 @@ except ImportError:
 
 APP_DIR = os.path.join(os.environ.get("APPDATA", "."), "LunaStoreXP")
 SESSION_FILE = os.path.join(APP_DIR, "session.dat")
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 CACHE_DIR = os.path.join(APP_DIR, "icons")
 ICON_SIZE = (20, 20)
+MAX_APPS = 200
 
 
-# ---------- Windows DPAPI (шифрование сессии) ----------
+# ---------- Windows DPAPI ----------
 
 class DATA_BLOB(ctypes.Structure):
     _fields_ = [
@@ -66,11 +69,10 @@ def _bytes_to_blob(data):
     blob = DATA_BLOB()
     blob.cbData = len(data)
     blob.pbData = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
-    return blob, buf  # buf держим, чтобы не собрал GC
+    return blob, buf
 
 
 def dpapi_encrypt(plaintext):
-    """Шифрует строку через Windows DPAPI. Возвращает bytes или None."""
     try:
         data = plaintext.encode("utf-8")
         blob_in, _buf = _bytes_to_blob(data)
@@ -89,7 +91,6 @@ def dpapi_encrypt(plaintext):
 
 
 def dpapi_decrypt(ciphertext):
-    """Расшифровывает blob от dpapi_encrypt. Возвращает строку или None."""
     try:
         blob_in, _buf = _bytes_to_blob(ciphertext)
         blob_out = DATA_BLOB()
@@ -106,14 +107,27 @@ def dpapi_decrypt(ciphertext):
         return None
 
 
+# ---------- TLS-диагностика ----------
+
+def check_tls_support(base_url):
+    """Проверяет HTTPS. Возвращает (ok, message)."""
+    try:
+        resp = requests.get(base_url, timeout=10, verify=False)
+        return True, "TLS OK (HTTP %d)" % resp.status_code
+    except requests.exceptions.SSLError as e:
+        return False, "SSL: %s" % str(e)[:120]
+    except requests.exceptions.RequestException as e:
+        return False, "Сеть: %s" % str(e)[:120]
+
+
 # ---------- Приложение ----------
 
 class LunaStoreProduct:
     def __init__(self, root):
         self.root = root
         self.root.title("LunaStore — XP Edition")
-        self.root.geometry("1020x680")
-        self.root.minsize(860, 540)
+        self.root.geometry("1080x720")
+        self.root.minsize(900, 560)
 
         self.COLORS = {
             "bg": "#11111b",
@@ -149,7 +163,13 @@ class LunaStoreProduct:
         self._load_generation = 0
         self._refresh_lock = threading.Lock()
 
-        # Ссылки на виджеты/картинки, чтобы GC не съел
+        # Настройки по умолчанию
+        self.settings = {
+            "download_dir": os.path.expanduser("~"),
+        }
+        self._load_settings_file()
+
+        # Ссылки на виджеты
         self._icon_refs = {}
         self._row_widgets = []
         self._selected_index = None
@@ -157,8 +177,29 @@ class LunaStoreProduct:
         self._setup_style()
         self._build_ui()
 
-        # Пробуем восстановить сессию
-        self.root.after(300, self._try_restore_session)
+        # Диагностика TLS и восстановление сессии
+        self.root.after(300, self._initial_checks)
+
+    # ==================== Настройки (файл) ====================
+
+    def _load_settings_file(self):
+        try:
+            if os.path.isfile(SETTINGS_FILE):
+                with open(SETTINGS_FILE, "r") as f:
+                    data = json.load(f)
+                if "download_dir" in data:
+                    self.settings["download_dir"] = data["download_dir"]
+        except Exception:
+            pass
+
+    def _save_settings_file(self):
+        try:
+            if not os.path.isdir(APP_DIR):
+                os.makedirs(APP_DIR)
+            with open(SETTINGS_FILE, "w") as f:
+                json.dump(self.settings, f)
+        except Exception:
+            pass
 
     # ==================== Стиль ====================
 
@@ -172,7 +213,6 @@ class LunaStoreProduct:
         style.configure("TFrame", background=c["bg"])
         style.configure("Surface.TFrame", background=c["surface"])
         style.configure("TLabel", background=c["bg"], foreground=c["text"])
-        style.configure("Sub.TLabel", foreground=c["subtext"], font=("Arial", 9))
 
         style.configure(
             "Accent.TButton", background=c["accent"], foreground="#11111b",
@@ -191,7 +231,7 @@ class LunaStoreProduct:
     def _build_ui(self):
         c = self.COLORS
 
-        # --- Верхняя панель ---
+        # Верхняя панель
         header = tk.Frame(self.root, bg=c["surface"], height=56)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
@@ -207,12 +247,17 @@ class LunaStoreProduct:
         )
         self.status_label.pack(side=tk.RIGHT, padx=16)
 
-        # --- Основная область ---
+        ttk.Button(
+            header, text="Настройки", style="Ghost.TButton",
+            command=self._open_settings_window
+        ).pack(side=tk.RIGHT, padx=8, pady=12)
+
+        # Основная область
         main = tk.Frame(self.root, bg=c["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        # === Левая колонка ===
-        left = tk.Frame(main, bg=c["surface"], width=240)
+        # --- Левая колонка ---
+        left = tk.Frame(main, bg=c["surface"], width=250)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
         left.pack_propagate(False)
 
@@ -255,15 +300,14 @@ class LunaStoreProduct:
         self.category_combo.bind("<<ComboboxSelected>>", self._on_category_change)
         self.category_combo.state(["disabled"])
 
-        # Разделитель
         tk.Frame(left, bg=c["surface2"], height=1).pack(fill=tk.X, padx=12, pady=12)
 
         tk.Label(
-            left, text="Сессия хранится зашифрованной\n(Windows DPAPI)",
+            left, text="Сессия шифруется через\nWindows DPAPI",
             bg=c["surface"], fg=c["subtext"], font=("Arial", 8), justify=tk.LEFT
         ).pack(anchor=tk.W, padx=12, pady=4)
 
-        # === Центральная колонка ===
+        # --- Центральная колонка ---
         center = tk.Frame(main, bg=c["surface"])
         center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
 
@@ -302,7 +346,7 @@ class LunaStoreProduct:
         )
         self.clear_btn.pack(side=tk.LEFT, padx=(4, 0))
 
-        # Список (Canvas + Frame-строки)
+        # Список (Canvas + строки)
         list_container = tk.Frame(center, bg=c["surface"])
         list_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
@@ -339,8 +383,8 @@ class LunaStoreProduct:
         )
         self.load_more_btn.pack(pady=6)
 
-        # === Правая колонка ===
-        right = tk.Frame(main, bg=c["surface"], width=280)
+        # --- Правая колонка ---
+        right = tk.Frame(main, bg=c["surface"], width=300)
         right.pack(side=tk.RIGHT, fill=tk.Y)
         right.pack_propagate(False)
 
@@ -349,19 +393,19 @@ class LunaStoreProduct:
 
         self.detail_title = tk.Label(
             right, text="Выберите приложение", bg=c["surface"], fg=c["subtext"],
-            font=("Arial", 10, "bold"), wraplength=250, justify=tk.LEFT
+            font=("Arial", 10, "bold"), wraplength=270, justify=tk.LEFT
         )
         self.detail_title.pack(anchor=tk.W, padx=12, pady=4)
 
         self.detail_meta = tk.Label(
             right, text="", bg=c["surface"], fg=c["subtext"],
-            font=("Arial", 8), wraplength=250, justify=tk.LEFT
+            font=("Arial", 8), wraplength=270, justify=tk.LEFT
         )
         self.detail_meta.pack(anchor=tk.W, padx=12, pady=4)
 
         self.detail_desc = tk.Label(
             right, text="", bg=c["surface"], fg=c["text"],
-            font=("Arial", 9), wraplength=250, justify=tk.LEFT
+            font=("Arial", 9), wraplength=270, justify=tk.LEFT
         )
         self.detail_desc.pack(anchor=tk.W, padx=12, pady=8)
 
@@ -369,9 +413,15 @@ class LunaStoreProduct:
             right, text="Скачать", style="Accent.TButton",
             command=self._download_app, state=["disabled"]
         )
-        self.download_btn.pack(padx=12, pady=8, fill=tk.X)
+        self.download_btn.pack(padx=12, pady=4, fill=tk.X)
 
-        # === Нижний статус-бар ===
+        self.details_btn = ttk.Button(
+            right, text="Подробнее", style="Ghost.TButton",
+            command=self._open_app_window, state=["disabled"]
+        )
+        self.details_btn.pack(padx=12, pady=4, fill=tk.X)
+
+        # Нижний статус-бар
         self.footer = tk.Label(
             self.root, text="Готово — войдите в аккаунт",
             bg=c["surface"], fg=c["subtext"], font=("Arial", 8),
@@ -391,9 +441,31 @@ class LunaStoreProduct:
 
     def _on_mousewheel(self, event):
         try:
-            self.canvas.yview_scroll(int(-event.delta / 120), "units")
+            delta = int(-event.delta / 120)
+            if delta == 0:
+                delta = -1 if event.delta > 0 else 1
+            self.canvas.yview_scroll(delta, "units")
         except Exception:
             pass
+
+    # ==================== Старт ====================
+
+    def _initial_checks(self):
+        base = self.instance_url.get().strip().rstrip("/")
+        ok, msg = check_tls_support(base)
+        if not ok:
+            messagebox.showwarning(
+                "Проблема с соединением",
+                "Не удалось установить HTTPS-соединение:\n\n"
+                "%s\n\n"
+                "Возможные причины:\n"
+                "1. На этой машине отключён TLS 1.2.\n"
+                "2. Прокси или файрвол блокирует соединение.\n"
+                "3. Устаревшие сертификаты Windows XP.\n\n"
+                "Установите обновление KB948963 или обновите корневые сертификаты." % msg
+            )
+            self._set_status("TLS недоступен", self.COLORS["danger"])
+        self._try_restore_session()
 
     # ==================== Сессия (DPAPI) ====================
 
@@ -427,7 +499,6 @@ class LunaStoreProduct:
             pass
 
     def _try_restore_session(self):
-        # Разовая миграция: удалить старый незашифрованный файл
         old_file = os.path.join(APP_DIR, "session.json")
         if os.path.isfile(old_file):
             try:
@@ -535,6 +606,7 @@ class LunaStoreProduct:
         self.detail_meta.config(text="")
         self.detail_desc.config(text="")
         self.download_btn.state(["disabled"])
+        self.details_btn.state(["disabled"])
         self.login_btn.state(["!disabled"])
         self.logout_btn.state(["disabled"])
         self.refresh_btn.state(["disabled"])
@@ -546,7 +618,6 @@ class LunaStoreProduct:
     # ==================== Автообновление токена ====================
 
     def _refresh_access_token(self, then=None):
-        """Асинхронный refresh. then(ok) вызовется в главном потоке."""
         url = self._api_url("/method/v2/auth/token/refresh/")
 
         def task():
@@ -573,10 +644,6 @@ class LunaStoreProduct:
         threading.Thread(target=task, daemon=True).start()
 
     def _api_request_with_retry(self, method, url, **kwargs):
-        """
-        Синхронный запрос с автообновлением токена при 401.
-        Возвращает response или None при полной неудаче.
-        """
         headers = kwargs.pop("headers", {}) or {}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
@@ -609,7 +676,6 @@ class LunaStoreProduct:
         return resp
 
     def _refresh_access_token_sync(self, callback):
-        """Синхронный refresh для использования из рабочих потоков."""
         url = self._api_url("/method/v2/auth/token/refresh/")
         try:
             with self._refresh_lock:
@@ -635,26 +701,23 @@ class LunaStoreProduct:
     def _load_categories(self):
         if not self.token:
             return
-
         url = self._api_url("/method/v2/category/")
 
         def task():
+            resp = self._api_request_with_retry(
+                "GET", url, params={"limit": 100}, timeout=20
+            )
+            if resp is None or resp.status_code != 200:
+                self.root.after(0, lambda: self._set_status(
+                    "Не удалось загрузить категории", self.COLORS["warn"]
+                ))
+                return
             try:
-                resp = self._api_request_with_retry(
-                    "GET", url, params={"limit": 100}, timeout=20
-                )
-                if resp is None or resp.status_code != 200:
-                    self.root.after(0, lambda: self._set_status(
-                        "Не удалось загрузить категории", self.COLORS["warn"]
-                    ))
-                    return
                 data = resp.json()
                 results = data.get("results", [])
                 self.root.after(0, lambda: self._on_categories_loaded(results))
-            except Exception as e:
-                self.root.after(0, lambda: self._set_status(
-                    "Ошибка категорий: " + str(e)[:50], self.COLORS["warn"]
-                ))
+            except Exception:
+                pass
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -673,7 +736,6 @@ class LunaStoreProduct:
         self.category_combo.config(values=names)
         self.category_combo.set("Все категории")
         self.category_combo.state(["!disabled"])
-        self._set_status("Категорий: %d" % len(categories))
 
     def _on_category_change(self, event=None):
         name = self.category_var.get()
@@ -713,6 +775,16 @@ class LunaStoreProduct:
         if not self.token:
             return
         if append and self.is_loading:
+            return
+
+        # Лимит на количество приложений
+        if not append and self.offset + self.limit > MAX_APPS:
+            self._set_status("Достигнут лимит. Используйте поиск.", self.COLORS["warn"])
+            self.load_more_btn.state(["disabled"])
+            return
+        if append and len(self.apps_data) >= MAX_APPS:
+            self._set_status("Достигнут лимит %d приложений." % MAX_APPS, self.COLORS["warn"])
+            self.load_more_btn.state(["disabled"])
             return
 
         self.is_loading = True
@@ -767,14 +839,25 @@ class LunaStoreProduct:
 
         if results:
             start_index = len(self.apps_data)
-            self.apps_data.extend(results)
+            # Ограничиваем общее количество
+            remaining = MAX_APPS - start_index
+            if remaining <= 0:
+                self.load_more_btn.state(["disabled"])
+                return
+            results = results[:remaining]
 
+            self.apps_data.extend(results)
             for i, app in enumerate(results):
                 self._render_row(start_index + i, app)
 
             self.offset += len(results)
             self._set_status("Загружено приложений: %d" % len(self.apps_data))
-            self.load_more_btn.state(["!disabled"])
+
+            if len(self.apps_data) >= MAX_APPS:
+                self.load_more_btn.state(["disabled"])
+                self._set_status("Достигнут лимит %d" % MAX_APPS, self.COLORS["warn"])
+            else:
+                self.load_more_btn.state(["!disabled"])
         else:
             if not append:
                 empty = tk.Label(
@@ -838,12 +921,12 @@ class LunaStoreProduct:
         self.load_more_btn.state(["disabled"])
 
         self._clear_list()
-        self.apps_data = results
-        self.offset = len(results)
+        self.apps_data = results[:MAX_APPS]
+        self.offset = len(self.apps_data)
 
-        if not results:
+        if not self.apps_data:
             empty = tk.Label(
-                self.list_inner, text="Ничего не найдено по запросу: " + query,
+                self.list_inner, text="Ничего не найдено: " + query,
                 bg=self.COLORS["surface2"], fg=self.COLORS["subtext"],
                 font=("Arial", 10), anchor=tk.W
             )
@@ -852,10 +935,10 @@ class LunaStoreProduct:
             self._set_status("Ничего не найдено")
             return
 
-        for i, app in enumerate(results):
+        for i, app in enumerate(self.apps_data):
             self._render_row(i, app)
 
-        self._set_status("Найдено: %d" % len(results), self.COLORS["accent2"])
+        self._set_status("Найдено: %d" % len(self.apps_data), self.COLORS["accent2"])
 
     def _on_token_expired(self):
         self._set_status("Сессия истекла, войдите заново", self.COLORS["danger"])
@@ -871,7 +954,6 @@ class LunaStoreProduct:
         return os.path.join(CACHE_DIR, "app_%s.png" % app_id)
 
     def _get_icon_for_app(self, app):
-        """Возвращает PhotoImage или None."""
         if not HAS_PIL:
             return None
 
@@ -908,7 +990,7 @@ class LunaStoreProduct:
         except Exception:
             return None
 
-    # ==================== Список (Canvas + строки) ====================
+    # ==================== Список ====================
 
     def _clear_list(self):
         for w in self._row_widgets:
@@ -944,8 +1026,7 @@ class LunaStoreProduct:
         )
         name_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), pady=3)
 
-        # Биндим клики на все дочерние виджеты и на сам row
-        for widget in [row, name_label] + [w for w in row.winfo_children() if w != name_label]:
+        for widget in row.winfo_children() + [row]:
             widget.bind("<Button-1>", lambda e, i=index: self._select_row(i))
             widget.bind("<Enter>", lambda e, r=row: self._hover_row(r, True))
             widget.bind("<Leave>", lambda e, r=row: self._hover_row(r, False))
@@ -970,7 +1051,6 @@ class LunaStoreProduct:
 
     def _select_row(self, index):
         c = self.COLORS
-        # Снимаем с предыдущей
         if self._selected_index is not None:
             try:
                 old = self._row_widgets[self._selected_index]
@@ -1007,6 +1087,7 @@ class LunaStoreProduct:
         self.detail_desc.config(text=desc[:300] + ("..." if len(desc) > 300 else ""))
 
         self.download_btn.state(["!disabled"])
+        self.details_btn.state(["!disabled"])
 
     # ==================== Скачивание ====================
 
@@ -1020,7 +1101,7 @@ class LunaStoreProduct:
 
         url = self._api_url("/method/v2/distribution/")
         params = {"application": app_id}
-        self._set_status("Получение ссылки на скачивание...", self.COLORS["accent"])
+        self._set_status("Получение ссылки...", self.COLORS["accent"])
 
         def task():
             resp = self._api_request_with_retry("GET", url, params=params, timeout=15)
@@ -1031,23 +1112,404 @@ class LunaStoreProduct:
                 data = resp.json()
                 results = data.get("results", [])
                 if not results:
-                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет доступных файлов"))
+                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет файлов"))
                     return
                 dist = results[0]
                 link = dist.get("file") or dist.get("url") or ""
-                if link:
-                    self.root.after(0, lambda: self._open_download(link))
-                else:
-                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет ссылки на файл"))
+                if not link:
+                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет ссылки"))
+                    return
+                self.root.after(0, lambda: self._start_file_download(link, dist))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Ошибка", str(e)[:100]))
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _open_download(self, url):
-        import webbrowser
-        webbrowser.open(url)
-        self._set_status("Ссылка открыта в браузере", self.COLORS["accent2"])
+    def _start_file_download(self, url, dist_info):
+        default_name = dist_info.get("filename") or url.split("/")[-1] or "download.bin"
+        if "?" in default_name:
+            default_name = default_name.split("?")[0]
+        if not default_name:
+            default_name = "lunastore_download.bin"
+
+        initial_dir = self.settings.get("download_dir", os.path.expanduser("~"))
+
+        path = filedialog.asksaveasfilename(
+            title="Сохранить как",
+            initialdir=initial_dir,
+            initialfile=default_name
+        )
+        if not path:
+            return
+
+        # Запоминаем папку
+        self.settings["download_dir"] = os.path.dirname(path)
+        self._save_settings_file()
+
+        prog = tk.Toplevel(self.root)
+        prog.title("Скачивание")
+        prog.geometry("400x140")
+        prog.configure(bg=self.COLORS["surface"])
+        prog.transient(self.root)
+        prog.grab_set()
+
+        tk.Label(
+            prog, text=default_name[:70],
+            bg=self.COLORS["surface"], fg=self.COLORS["text"],
+            font=("Arial", 10), wraplength=360
+        ).pack(pady=(12, 6))
+
+        bar = ttk.Progressbar(prog, mode="determinate", length=360, maximum=100)
+        bar.pack(pady=6)
+
+        info = tk.Label(
+            prog, text="0%", bg=self.COLORS["surface"], fg=self.COLORS["subtext"],
+            font=("Arial", 9)
+        )
+        info.pack()
+
+        state = {"cancel": False}
+
+        def on_cancel():
+            state["cancel"] = True
+
+        ttk.Button(prog, text="Отмена", style="Ghost.TButton",
+                   command=on_cancel).pack(pady=6)
+
+        def progress_task():
+            try:
+                r = requests.get(url, stream=True, timeout=30, verify=False)
+                if r.status_code != 200:
+                    r.close()
+                    self.root.after(0, lambda: messagebox.showerror(
+                        "Ошибка", "HTTP %d" % r.status_code
+                    ))
+                    self.root.after(0, prog.destroy)
+                    return
+
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                chunk_size = 8192
+
+                with open(path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=chunk_size):
+                        if state["cancel"]:
+                            r.close()
+                            try:
+                                f.close()
+                            except Exception:
+                                pass
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+                            self.root.after(0, prog.destroy)
+                            self.root.after(0, lambda: self._set_status("Скачивание отменено"))
+                            return
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0:
+                            pct = int(downloaded * 100 / total)
+                            self.root.after(
+                                0,
+                                lambda p=pct, d=downloaded, t=total:
+                                    self._update_progress(bar, info, p, d, t)
+                            )
+                        else:
+                            self.root.after(
+                                0,
+                                lambda d=downloaded:
+                                    self._update_progress(bar, info, 0, d, 0)
+                            )
+
+                r.close()
+                self.root.after(0, lambda: self._download_done(prog, path, downloaded))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Ошибка скачивания", str(e)[:150]
+                ))
+                self.root.after(0, prog.destroy)
+
+        threading.Thread(target=progress_task, daemon=True).start()
+
+    def _update_progress(self, bar, info_label, pct, downloaded, total):
+        try:
+            if total > 0:
+                bar["value"] = pct
+                mb_done = downloaded / (1024.0 * 1024.0)
+                mb_total = total / (1024.0 * 1024.0)
+                info_label.config(text="%d%%  (%.1f / %.1f МБ)" % (pct, mb_done, mb_total))
+            else:
+                mb_done = downloaded / (1024.0 * 1024.0)
+                info_label.config(text="%.1f МБ" % mb_done)
+        except Exception:
+            pass
+
+    def _download_done(self, prog_window, path, downloaded):
+        try:
+            prog_window.destroy()
+        except Exception:
+            pass
+        self._set_status("Скачано: " + os.path.basename(path), self.COLORS["accent2"])
+        if messagebox.askyesno("Готово", "Файл скачан:\n%s\n\nОткрыть папку?" % path):
+            try:
+                os.startfile(os.path.dirname(path))
+            except Exception:
+                pass
+
+    # ==================== Расширенная карточка приложения ====================
+
+    def _open_app_window(self):
+        if not self.selected_app:
+            return
+        app = self.selected_app
+        c = self.COLORS
+
+        win = tk.Toplevel(self.root)
+        win.title(app.get("name", "Приложение"))
+        win.geometry("700x560")
+        win.configure(bg=c["surface"])
+        win.transient(self.root)
+
+        # Заголовок
+        head = tk.Frame(win, bg=c["surface"])
+        head.pack(fill=tk.X, padx=16, pady=16)
+
+        # Большая иконка
+        big_icon = self._get_big_icon(app, (64, 64))
+        if big_icon is not None:
+            self._big_icon_ref = big_icon  # держим ссылку
+            tk.Label(head, image=big_icon, bg=c["surface"]).pack(side=tk.LEFT, padx=(0, 12))
+
+        info_head = tk.Frame(head, bg=c["surface"])
+        info_head.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(
+            info_head, text=app.get("name", "Без названия"),
+            bg=c["surface"], fg=c["text"], font=("Arial", 16, "bold"),
+            anchor=tk.W, justify=tk.LEFT
+        ).pack(anchor=tk.W)
+
+        sub_parts = []
+        for key, label in [("version", "версия"), ("size", "размер"), ("author", "автор")]:
+            if app.get(key):
+                sub_parts.append("%s %s" % (label, app[key]))
+        tk.Label(
+            info_head, text="   ".join(sub_parts) or "—",
+            bg=c["surface"], fg=c["subtext"], font=("Arial", 9),
+            anchor=tk.W, justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        # Notebook с вкладками
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 8))
+
+        # Вкладка «Описание»
+        desc_tab = tk.Frame(nb, bg=c["surface"])
+        nb.add(desc_tab, text="Описание")
+
+        desc_text = tk.Text(
+            desc_tab, bg=c["surface2"], fg=c["text"],
+            font=("Arial", 10), wrap=tk.WORD,
+            borderwidth=0, highlightthickness=0, padx=8, pady=8
+        )
+        desc_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        desc_text.insert("1.0", app.get("description") or app.get("summary") or "Описание отсутствует")
+        desc_text.config(state=tk.DISABLED)
+
+        # Вкладка «Скриншоты»
+        shots_tab = tk.Frame(nb, bg=c["surface"])
+        nb.add(shots_tab, text="Скриншоты")
+
+        shots = app.get("screenshots") or app.get("images") or []
+        if shots:
+            tk.Label(
+                shots_tab, text="Найдено изображений: %d" % len(shots),
+                bg=c["surface"], fg=c["subtext"], font=("Arial", 9)
+            ).pack(anchor=tk.W, padx=8, pady=6)
+            for s in shots[:5]:
+                url = s if isinstance(s, str) else (s.get("url") or s.get("image") or "")
+                if url:
+                    tk.Label(
+                        shots_tab, text=url[:80],
+                        bg=c["surface"], fg=c["accent"], font=("Arial", 8),
+                        anchor=tk.W, cursor="hand2"
+                    ).pack(anchor=tk.W, padx=8, pady=2)
+        else:
+            tk.Label(
+                shots_tab, text="Скриншоты не предоставлены",
+                bg=c["surface"], fg=c["subtext"], font=("Arial", 9)
+            ).pack(pady=20)
+
+        # Вкладка «Дополнительно»
+        extra_tab = tk.Frame(nb, bg=c["surface"])
+        nb.add(extra_tab, text="Дополнительно")
+
+        extra_text = tk.Text(
+            extra_tab, bg=c["surface2"], fg=c["text"],
+            font=("Courier New", 9), wrap=tk.WORD,
+            borderwidth=0, highlightthickness=0, padx=8, pady=8
+        )
+        extra_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # Показываем все поля, которые пришли от API
+        try:
+            extra_text.insert("1.0", json.dumps(app, ensure_ascii=False, indent=2))
+        except Exception:
+            extra_text.insert("1.0", "Нет данных")
+        extra_text.config(state=tk.DISABLED)
+
+        # Кнопки
+        btns = tk.Frame(win, bg=c["surface"])
+        btns.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+        ttk.Button(
+            btns, text="Скачать", style="Accent.TButton",
+            command=lambda: (win.destroy(), self._download_app())
+        ).pack(side=tk.RIGHT, padx=4)
+
+        ttk.Button(
+            btns, text="Закрыть", style="Ghost.TButton",
+            command=win.destroy
+        ).pack(side=tk.RIGHT, padx=4)
+
+    def _get_big_icon(self, app, size):
+        """Загружает иконку большего размера для карточки."""
+        if not HAS_PIL:
+            return None
+        app_id = app.get("id")
+        if not app_id:
+            return None
+        icon_url = (
+            app.get("icon") or app.get("logo") or
+            app.get("image") or app.get("icon_url") or ""
+        )
+        if not icon_url:
+            return None
+        if icon_url.startswith("/"):
+            icon_url = self.instance_url.get().strip().rstrip("/") + icon_url
+
+        # Используем тот же кэш, но пересобираем в большем размере
+        cache_path = self._icon_cache_path(app_id)
+        try:
+            if not os.path.isfile(cache_path):
+                return None
+            img = Image.open(cache_path)
+            img = img.convert("RGBA")
+            img.thumbnail(size, Image.LANCZOS)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    # ==================== Настройки ====================
+
+    def _open_settings_window(self):
+        c = self.COLORS
+        win = tk.Toplevel(self.root)
+        win.title("Настройки")
+        win.geometry("480x320")
+        win.configure(bg=c["surface"])
+        win.transient(self.root)
+        win.grab_set()
+
+        tk.Label(
+            win, text="Настройки", bg=c["surface"], fg=c["text"],
+            font=("Arial", 14, "bold")
+        ).pack(anchor=tk.W, padx=16, pady=(16, 12))
+
+        # Папка загрузок
+        tk.Label(win, text="Папка для скачивания",
+                 bg=c["surface"], fg=c["subtext"], font=("Arial", 9)
+                 ).pack(anchor=tk.W, padx=16)
+
+        dir_frame = tk.Frame(win, bg=c["surface"])
+        dir_frame.pack(fill=tk.X, padx=16, pady=(2, 12))
+
+        dir_var = tk.StringVar(value=self.settings.get("download_dir", ""))
+        ttk.Entry(dir_frame, textvariable=dir_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+
+        def choose_dir():
+            d = filedialog.askdirectory(
+                title="Выберите папку",
+                initialdir=dir_var.get() or os.path.expanduser("~")
+            )
+            if d:
+                dir_var.set(d)
+
+        ttk.Button(dir_frame, text="...", style="Ghost.TButton",
+                   command=choose_dir, width=3).pack(side=tk.LEFT, padx=(4, 0))
+
+        # Кнопки действий
+        tk.Frame(win, bg=c["surface2"], height=1).pack(fill=tk.X, padx=16, pady=8)
+
+        tk.Label(win, text="Действия",
+                 bg=c["surface"], fg=c["subtext"], font=("Arial", 9)
+                 ).pack(anchor=tk.W, padx=16)
+
+        actions = tk.Frame(win, bg=c["surface"])
+        actions.pack(fill=tk.X, padx=16, pady=(4, 12))
+
+        def clear_icons():
+            if not os.path.isdir(CACHE_DIR):
+                messagebox.showinfo("Кэш", "Кэш иконок пуст")
+                return
+            count = 0
+            for f in os.listdir(CACHE_DIR):
+                try:
+                    os.remove(os.path.join(CACHE_DIR, f))
+                    count += 1
+                except Exception:
+                    pass
+            self._icon_refs = {}
+            messagebox.showinfo("Кэш", "Удалено файлов: %d" % count)
+
+        def reset_session():
+            if messagebox.askyesno("Сброс", "Удалить сохранённую сессию?"):
+                self._clear_session()
+                self.refresh_token = None
+                self.token = None
+                messagebox.showinfo("Сброс", "Сессия удалена. Перезайдите.")
+
+        def clear_all():
+            if messagebox.askyesno("Подтверждение",
+                                   "Удалить ВСЕ данные клиента (сессию, настройки, кэш)?"):
+                try:
+                    for f in [SESSION_FILE, SETTINGS_FILE]:
+                        if os.path.isfile(f):
+                            os.remove(f)
+                    if os.path.isdir(CACHE_DIR):
+                        for f in os.listdir(CACHE_DIR):
+                            try:
+                                os.remove(os.path.join(CACHE_DIR, f))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                messagebox.showinfo("Готово", "Данные удалены")
+
+        ttk.Button(actions, text="Очистить кэш иконок", style="Ghost.TButton",
+                   command=clear_icons).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(actions, text="Сбросить сессию", style="Ghost.TButton",
+                   command=reset_session).pack(side=tk.LEFT, padx=4)
+        ttk.Button(actions, text="Удалить всё", style="Ghost.TButton",
+                   command=clear_all).pack(side=tk.LEFT, padx=4)
+
+        # Кнопки «Сохранить» / «Отмена»
+        footer = tk.Frame(win, bg=c["surface"])
+        footer.pack(fill=tk.X, side=tk.BOTTOM, padx=16, pady=12)
+
+        def save_and_close():
+            self.settings["download_dir"] = dir_var.get().strip() or os.path.expanduser("~")
+            self._save_settings_file()
+            win.destroy()
+
+        ttk.Button(footer, text="Сохранить", style="Accent.TButton",
+                   command=save_and_close).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(footer, text="Отмена", style="Ghost.TButton",
+                   command=win.destroy).pack(side=tk.RIGHT, padx=4)
 
 
 if __name__ == "__main__":
