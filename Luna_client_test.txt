@@ -1,0 +1,1056 @@
+# -*- coding: utf-8 -*-
+"""
+LunaStore Client XP Edition - Product v1.0
+Windows XP SP3 | Python 3.4 | Tkinter
+Функции: JWT + auto-refresh, DPAPI-шифрование сессии, поиск,
+категории, иконки с кэшем, скачивание, авто-восстановление сессии.
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import json
+import os
+import sys
+import threading
+import ctypes
+from ctypes import wintypes
+
+# ---------- Зависимости ----------
+
+try:
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    tk.Tk().withdraw()
+    messagebox.showerror(
+        "缺少依赖 / Нет зависимостей",
+        "Не найден requests.\n"
+        "Скачайте requests 2.20.0 и положите в Python34/Lib/site-packages/"
+    )
+    sys.exit(1)
+
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
+
+# ---------- Пути ----------
+
+APP_DIR = os.path.join(os.environ.get("APPDATA", "."), "LunaStoreXP")
+SESSION_FILE = os.path.join(APP_DIR, "session.dat")
+CACHE_DIR = os.path.join(APP_DIR, "icons")
+ICON_SIZE = (20, 20)
+
+
+# ---------- Windows DPAPI (шифрование сессии) ----------
+
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbData", wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_char)),
+    ]
+
+
+def _blob_to_bytes(blob):
+    size = blob.cbData
+    data = ctypes.string_at(blob.pbData, size)
+    ctypes.windll.kernel32.LocalFree(blob.pbData)
+    return data
+
+
+def _bytes_to_blob(data):
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob = DATA_BLOB()
+    blob.cbData = len(data)
+    blob.pbData = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+    return blob, buf  # buf держим, чтобы не собрал GC
+
+
+def dpapi_encrypt(plaintext):
+    """Шифрует строку через Windows DPAPI. Возвращает bytes или None."""
+    try:
+        data = plaintext.encode("utf-8")
+        blob_in, _buf = _bytes_to_blob(data)
+        blob_out = DATA_BLOB()
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(blob_in),
+            u"LunaStoreXP",
+            None, None, None, 0,
+            ctypes.byref(blob_out),
+        )
+        if not ok:
+            return None
+        return _blob_to_bytes(blob_out)
+    except Exception:
+        return None
+
+
+def dpapi_decrypt(ciphertext):
+    """Расшифровывает blob от dpapi_encrypt. Возвращает строку или None."""
+    try:
+        blob_in, _buf = _bytes_to_blob(ciphertext)
+        blob_out = DATA_BLOB()
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in),
+            None, None, None, None, 0,
+            ctypes.byref(blob_out),
+        )
+        if not ok:
+            return None
+        raw = _blob_to_bytes(blob_out)
+        return raw.decode("utf-8")
+    except Exception:
+        return None
+
+
+# ---------- Приложение ----------
+
+class LunaStoreProduct:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("LunaStore — XP Edition")
+        self.root.geometry("1020x680")
+        self.root.minsize(860, 540)
+
+        self.COLORS = {
+            "bg": "#11111b",
+            "surface": "#1e1e2e",
+            "surface2": "#313244",
+            "text": "#cdd6f4",
+            "subtext": "#a6adc8",
+            "accent": "#89b4fa",
+            "accent2": "#a6e3a1",
+            "danger": "#f38ba8",
+            "warn": "#f9e2af",
+        }
+
+        # Состояние
+        self.token = None
+        self.refresh_token = None
+        self.instance_url = tk.StringVar(value="https://lunastore.app")
+        self.username = tk.StringVar()
+        self.password = tk.StringVar()
+        self.search_query = tk.StringVar()
+        self.category_var = tk.StringVar(value="Все категории")
+
+        self.apps_data = []
+        self.selected_app = None
+        self.offset = 0
+        self.limit = 20
+
+        self.categories = []
+        self.category_id_map = {}
+        self.active_category_id = None
+
+        self.is_loading = False
+        self._load_generation = 0
+        self._refresh_lock = threading.Lock()
+
+        # Ссылки на виджеты/картинки, чтобы GC не съел
+        self._icon_refs = {}
+        self._row_widgets = []
+        self._selected_index = None
+
+        self._setup_style()
+        self._build_ui()
+
+        # Пробуем восстановить сессию
+        self.root.after(300, self._try_restore_session)
+
+    # ==================== Стиль ====================
+
+    def _setup_style(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        c = self.COLORS
+
+        self.root.configure(bg=c["bg"])
+        style.configure(".", background=c["bg"], foreground=c["text"])
+        style.configure("TFrame", background=c["bg"])
+        style.configure("Surface.TFrame", background=c["surface"])
+        style.configure("TLabel", background=c["bg"], foreground=c["text"])
+        style.configure("Sub.TLabel", foreground=c["subtext"], font=("Arial", 9))
+
+        style.configure(
+            "Accent.TButton", background=c["accent"], foreground="#11111b",
+            font=("Arial", 10, "bold"), borderwidth=0, focuscolor="none"
+        )
+        style.map("Accent.TButton", background=[("active", c["accent2"])])
+
+        style.configure(
+            "Ghost.TButton", background=c["surface2"], foreground=c["text"],
+            borderwidth=0, focuscolor="none"
+        )
+        style.map("Ghost.TButton", background=[("active", c["accent"])])
+
+    # ==================== Интерфейс ====================
+
+    def _build_ui(self):
+        c = self.COLORS
+
+        # --- Верхняя панель ---
+        header = tk.Frame(self.root, bg=c["surface"], height=56)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+
+        tk.Label(
+            header, text="LunaStore", bg=c["surface"], fg=c["accent"],
+            font=("Arial", 16, "bold")
+        ).pack(side=tk.LEFT, padx=16)
+
+        self.status_label = tk.Label(
+            header, text="Не подключено", bg=c["surface"], fg=c["subtext"],
+            font=("Arial", 9)
+        )
+        self.status_label.pack(side=tk.RIGHT, padx=16)
+
+        # --- Основная область ---
+        main = tk.Frame(self.root, bg=c["bg"])
+        main.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        # === Левая колонка ===
+        left = tk.Frame(main, bg=c["surface"], width=240)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        left.pack_propagate(False)
+
+        tk.Label(left, text="Аккаунт", bg=c["surface"], fg=c["text"],
+                 font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 6))
+
+        tk.Label(left, text="Сервер", bg=c["surface"], fg=c["subtext"],
+                 font=("Arial", 8)).pack(anchor=tk.W, padx=12)
+        ttk.Entry(left, textvariable=self.instance_url, width=24).pack(padx=12, pady=(0, 6))
+
+        tk.Label(left, text="Логин", bg=c["surface"], fg=c["subtext"],
+                 font=("Arial", 8)).pack(anchor=tk.W, padx=12)
+        ttk.Entry(left, textvariable=self.username, width=24).pack(padx=12, pady=(0, 6))
+
+        tk.Label(left, text="Пароль", bg=c["surface"], fg=c["subtext"],
+                 font=("Arial", 8)).pack(anchor=tk.W, padx=12)
+        ttk.Entry(left, textvariable=self.password, width=24, show="*").pack(padx=12, pady=(0, 8))
+
+        self.login_btn = ttk.Button(
+            left, text="Войти", style="Accent.TButton", command=self._do_login
+        )
+        self.login_btn.pack(padx=12, pady=4, fill=tk.X)
+
+        self.logout_btn = ttk.Button(
+            left, text="Выйти", style="Ghost.TButton", command=self._do_logout,
+            state=["disabled"]
+        )
+        self.logout_btn.pack(padx=12, pady=4, fill=tk.X)
+
+        # Категории
+        tk.Label(left, text="Категория", bg=c["surface"], fg=c["subtext"],
+                 font=("Arial", 8)).pack(anchor=tk.W, padx=12, pady=(10, 2))
+
+        self.category_combo = ttk.Combobox(
+            left, textvariable=self.category_var,
+            values=["Все категории"], state="readonly", width=22
+        )
+        self.category_combo.pack(padx=12, pady=(0, 4))
+        self.category_combo.set("Все категории")
+        self.category_combo.bind("<<ComboboxSelected>>", self._on_category_change)
+        self.category_combo.state(["disabled"])
+
+        # Разделитель
+        tk.Frame(left, bg=c["surface2"], height=1).pack(fill=tk.X, padx=12, pady=12)
+
+        tk.Label(
+            left, text="Сессия хранится зашифрованной\n(Windows DPAPI)",
+            bg=c["surface"], fg=c["subtext"], font=("Arial", 8), justify=tk.LEFT
+        ).pack(anchor=tk.W, padx=12, pady=4)
+
+        # === Центральная колонка ===
+        center = tk.Frame(main, bg=c["surface"])
+        center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        toolbar = tk.Frame(center, bg=c["surface"])
+        toolbar.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        tk.Label(toolbar, text="Магазин", bg=c["surface"], fg=c["text"],
+                 font=("Arial", 12, "bold")).pack(side=tk.LEFT)
+
+        self.refresh_btn = ttk.Button(
+            toolbar, text="Обновить", style="Ghost.TButton",
+            command=self._on_refresh_click, state=["disabled"]
+        )
+        self.refresh_btn.pack(side=tk.RIGHT)
+
+        # Строка поиска
+        search_frame = tk.Frame(center, bg=c["surface"])
+        search_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        tk.Label(search_frame, text="Поиск:", bg=c["surface"], fg=c["subtext"],
+                 font=("Arial", 9)).pack(side=tk.LEFT)
+
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_query)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        self.search_entry.bind("<Return>", lambda e: self._on_search_click())
+
+        self.search_btn = ttk.Button(
+            search_frame, text="Найти", style="Ghost.TButton",
+            command=self._on_search_click, state=["disabled"]
+        )
+        self.search_btn.pack(side=tk.LEFT)
+
+        self.clear_btn = ttk.Button(
+            search_frame, text="Сброс", style="Ghost.TButton",
+            command=self._on_clear_search, state=["disabled"]
+        )
+        self.clear_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Список (Canvas + Frame-строки)
+        list_container = tk.Frame(center, bg=c["surface"])
+        list_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        self.canvas = tk.Canvas(
+            list_container, bg=c["surface2"],
+            borderwidth=0, highlightthickness=0
+        )
+        scrollbar = ttk.Scrollbar(
+            list_container, orient="vertical", command=self.canvas.yview
+        )
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.list_inner = tk.Frame(self.canvas, bg=c["surface2"])
+        self.canvas_window = self.canvas.create_window(
+            (0, 0), window=self.list_inner, anchor="nw"
+        )
+
+        self.list_inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width)
+        )
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+        self.load_more_btn = ttk.Button(
+            center, text="Загрузить ещё", style="Ghost.TButton",
+            command=self._load_more, state=["disabled"]
+        )
+        self.load_more_btn.pack(pady=6)
+
+        # === Правая колонка ===
+        right = tk.Frame(main, bg=c["surface"], width=280)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
+        right.pack_propagate(False)
+
+        tk.Label(right, text="Подробности", bg=c["surface"], fg=c["text"],
+                 font=("Arial", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(12, 8))
+
+        self.detail_title = tk.Label(
+            right, text="Выберите приложение", bg=c["surface"], fg=c["subtext"],
+            font=("Arial", 10, "bold"), wraplength=250, justify=tk.LEFT
+        )
+        self.detail_title.pack(anchor=tk.W, padx=12, pady=4)
+
+        self.detail_meta = tk.Label(
+            right, text="", bg=c["surface"], fg=c["subtext"],
+            font=("Arial", 8), wraplength=250, justify=tk.LEFT
+        )
+        self.detail_meta.pack(anchor=tk.W, padx=12, pady=4)
+
+        self.detail_desc = tk.Label(
+            right, text="", bg=c["surface"], fg=c["text"],
+            font=("Arial", 9), wraplength=250, justify=tk.LEFT
+        )
+        self.detail_desc.pack(anchor=tk.W, padx=12, pady=8)
+
+        self.download_btn = ttk.Button(
+            right, text="Скачать", style="Accent.TButton",
+            command=self._download_app, state=["disabled"]
+        )
+        self.download_btn.pack(padx=12, pady=8, fill=tk.X)
+
+        # === Нижний статус-бар ===
+        self.footer = tk.Label(
+            self.root, text="Готово — войдите в аккаунт",
+            bg=c["surface"], fg=c["subtext"], font=("Arial", 8),
+            anchor=tk.W, padx=12
+        )
+        self.footer.pack(fill=tk.X, side=tk.BOTTOM)
+
+    # ==================== Утилиты ====================
+
+    def _api_url(self, path):
+        base = self.instance_url.get().strip().rstrip("/")
+        return base + path
+
+    def _set_status(self, text, color=None):
+        self.status_label.config(text=text, fg=color or self.COLORS["subtext"])
+        self.footer.config(text=text)
+
+    def _on_mousewheel(self, event):
+        try:
+            self.canvas.yview_scroll(int(-event.delta / 120), "units")
+        except Exception:
+            pass
+
+    # ==================== Сессия (DPAPI) ====================
+
+    def _save_session(self):
+        if not self.refresh_token:
+            return
+        try:
+            if not os.path.isdir(APP_DIR):
+                os.makedirs(APP_DIR)
+
+            payload = {
+                "instance_url": self.instance_url.get(),
+                "username": self.username.get(),
+                "refresh": self.refresh_token,
+            }
+            blob = dpapi_encrypt(json.dumps(payload))
+            if blob is None:
+                self._set_status("Не удалось зашифровать сессию", self.COLORS["warn"])
+                return
+
+            with open(SESSION_FILE, "wb") as f:
+                f.write(blob)
+        except Exception:
+            pass
+
+    def _clear_session(self):
+        try:
+            if os.path.isfile(SESSION_FILE):
+                os.remove(SESSION_FILE)
+        except Exception:
+            pass
+
+    def _try_restore_session(self):
+        # Разовая миграция: удалить старый незашифрованный файл
+        old_file = os.path.join(APP_DIR, "session.json")
+        if os.path.isfile(old_file):
+            try:
+                os.remove(old_file)
+            except Exception:
+                pass
+
+        if not os.path.isfile(SESSION_FILE):
+            return
+        try:
+            with open(SESSION_FILE, "rb") as f:
+                blob = f.read()
+
+            plaintext = dpapi_decrypt(blob)
+            if plaintext is None:
+                self._clear_session()
+                self._set_status("Сохранённая сессия недействительна")
+                return
+
+            data = json.loads(plaintext)
+            self.instance_url.set(data.get("instance_url", self.instance_url.get()))
+            self.username.set(data.get("username", ""))
+            self.refresh_token = data.get("refresh")
+
+            if self.refresh_token:
+                self._set_status("Восстановление сессии...", self.COLORS["accent"])
+                self._refresh_access_token(then=self._on_session_restored)
+        except Exception:
+            self._clear_session()
+
+    def _on_session_restored(self, ok):
+        if ok:
+            self.login_btn.state(["disabled"])
+            self.logout_btn.state(["!disabled"])
+            self.refresh_btn.state(["!disabled"])
+            self.search_btn.state(["!disabled"])
+            self.clear_btn.state(["!disabled"])
+            self._set_status("Сессия восстановлена", self.COLORS["accent2"])
+            self._load_categories()
+            self._load_apps()
+        else:
+            self._clear_session()
+            self._set_status("Не удалось восстановить сессию")
+
+    # ==================== Авторизация ====================
+
+    def _do_login(self):
+        url = self._api_url("/method/v2/auth/token/")
+        self._set_status("Вход...", self.COLORS["accent"])
+        self.login_btn.state(["disabled"])
+
+        def task():
+            try:
+                resp = requests.post(
+                    url,
+                    json={"username": self.username.get(),
+                          "password": self.password.get()},
+                    timeout=15, verify=False
+                )
+                data = resp.json()
+                if "access" in data:
+                    self.token = data["access"]
+                    self.refresh_token = data.get("refresh")
+                    self.root.after(0, self._on_login_success)
+                else:
+                    code = data.get("code", 0)
+                    msg = data.get("message", "Ошибка входа")
+                    self.root.after(0, lambda: self._on_login_error(code, msg))
+            except Exception as e:
+                self.root.after(0, lambda: self._on_login_error(0, str(e)))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_login_success(self):
+        self._set_status("Вход выполнен", self.COLORS["accent2"])
+        self.login_btn.state(["disabled"])
+        self.logout_btn.state(["!disabled"])
+        self.refresh_btn.state(["!disabled"])
+        self.search_btn.state(["!disabled"])
+        self.clear_btn.state(["!disabled"])
+        self._save_session()
+        self._load_categories()
+        self._load_apps()
+
+    def _on_login_error(self, code, msg):
+        self.login_btn.state(["!disabled"])
+        self._set_status("Ошибка входа", self.COLORS["danger"])
+        errors = {
+            1000: "Пользователь не найден",
+            1001: "Пользователь заблокирован",
+            4000: "Требуется 2FA (не поддерживается)",
+            4001: "Неверный код 2FA",
+        }
+        messagebox.showerror("Ошибка входа", errors.get(code, "Код %d: %s" % (code, msg)))
+
+    def _do_logout(self):
+        self.token = None
+        self.refresh_token = None
+        self.apps_data = []
+        self.offset = 0
+        self._clear_session()
+        self._clear_list()
+        self._clear_categories()
+        self.detail_title.config(text="Выберите приложение", fg=self.COLORS["subtext"])
+        self.detail_meta.config(text="")
+        self.detail_desc.config(text="")
+        self.download_btn.state(["disabled"])
+        self.login_btn.state(["!disabled"])
+        self.logout_btn.state(["disabled"])
+        self.refresh_btn.state(["disabled"])
+        self.search_btn.state(["disabled"])
+        self.clear_btn.state(["disabled"])
+        self.load_more_btn.state(["disabled"])
+        self._set_status("Вы вышли из аккаунта")
+
+    # ==================== Автообновление токена ====================
+
+    def _refresh_access_token(self, then=None):
+        """Асинхронный refresh. then(ok) вызовется в главном потоке."""
+        url = self._api_url("/method/v2/auth/token/refresh/")
+
+        def task():
+            with self._refresh_lock:
+                ok = False
+                try:
+                    resp = requests.post(
+                        url, json={"refresh": self.refresh_token},
+                        timeout=15, verify=False
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if "access" in data:
+                            self.token = data["access"]
+                            if "refresh" in data:
+                                self.refresh_token = data["refresh"]
+                                self._save_session()
+                            ok = True
+                except Exception:
+                    ok = False
+                if then:
+                    self.root.after(0, lambda: then(ok))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _api_request_with_retry(self, method, url, **kwargs):
+        """
+        Синхронный запрос с автообновлением токена при 401.
+        Возвращает response или None при полной неудаче.
+        """
+        headers = kwargs.pop("headers", {}) or {}
+        if self.token:
+            headers["Authorization"] = "Bearer " + self.token
+
+        try:
+            resp = requests.request(method, url, headers=headers, verify=False, **kwargs)
+        except Exception:
+            return None
+
+        if resp.status_code == 401 and self.refresh_token:
+            result = [False]
+            done = threading.Event()
+
+            def cb(ok):
+                result[0] = ok
+                done.set()
+
+            self._refresh_access_token_sync(cb)
+            done.wait(timeout=20)
+
+            if result[0]:
+                headers["Authorization"] = "Bearer " + self.token
+                try:
+                    resp = requests.request(
+                        method, url, headers=headers, verify=False, **kwargs
+                    )
+                except Exception:
+                    return None
+
+        return resp
+
+    def _refresh_access_token_sync(self, callback):
+        """Синхронный refresh для использования из рабочих потоков."""
+        url = self._api_url("/method/v2/auth/token/refresh/")
+        try:
+            with self._refresh_lock:
+                resp = requests.post(
+                    url, json={"refresh": self.refresh_token},
+                    timeout=15, verify=False
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "access" in data:
+                        self.token = data["access"]
+                        if "refresh" in data:
+                            self.refresh_token = data["refresh"]
+                            self._save_session()
+                        callback(True)
+                        return
+        except Exception:
+            pass
+        callback(False)
+
+    # ==================== Категории ====================
+
+    def _load_categories(self):
+        if not self.token:
+            return
+
+        url = self._api_url("/method/v2/category/")
+
+        def task():
+            try:
+                resp = self._api_request_with_retry(
+                    "GET", url, params={"limit": 100}, timeout=20
+                )
+                if resp is None or resp.status_code != 200:
+                    self.root.after(0, lambda: self._set_status(
+                        "Не удалось загрузить категории", self.COLORS["warn"]
+                    ))
+                    return
+                data = resp.json()
+                results = data.get("results", [])
+                self.root.after(0, lambda: self._on_categories_loaded(results))
+            except Exception as e:
+                self.root.after(0, lambda: self._set_status(
+                    "Ошибка категорий: " + str(e)[:50], self.COLORS["warn"]
+                ))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_categories_loaded(self, categories):
+        self.categories = categories
+        self.category_id_map = {}
+
+        names = ["Все категории"]
+        for cat in categories:
+            name = cat.get("name", "Без названия")
+            cid = cat.get("id")
+            if cid is not None:
+                self.category_id_map[name] = cid
+                names.append(name)
+
+        self.category_combo.config(values=names)
+        self.category_combo.set("Все категории")
+        self.category_combo.state(["!disabled"])
+        self._set_status("Категорий: %d" % len(categories))
+
+    def _on_category_change(self, event=None):
+        name = self.category_var.get()
+        self.active_category_id = self.category_id_map.get(name)
+        self.search_query.set("")
+        self._load_apps()
+
+    def _clear_categories(self):
+        self.categories = []
+        self.category_id_map = {}
+        self.active_category_id = None
+        try:
+            self.category_var.set("Все категории")
+            self.category_combo.config(values=["Все категории"])
+            self.category_combo.state(["disabled"])
+        except AttributeError:
+            pass
+
+    # ==================== Загрузка приложений ====================
+
+    def _on_refresh_click(self):
+        self.search_query.set("")
+        self._load_apps()
+
+    def _on_search_click(self):
+        q = self.search_query.get().strip()
+        if q:
+            self._search_apps(q)
+        else:
+            self._load_apps()
+
+    def _on_clear_search(self):
+        self.search_query.set("")
+        self._load_apps()
+
+    def _load_apps(self, append=False):
+        if not self.token:
+            return
+        if append and self.is_loading:
+            return
+
+        self.is_loading = True
+        self._load_generation += 1
+        my_gen = self._load_generation
+
+        self.refresh_btn.state(["disabled"])
+        self.load_more_btn.state(["disabled"])
+
+        if not append:
+            self.offset = 0
+            self._set_status("Загрузка приложений...", self.COLORS["accent"])
+
+        url = self._api_url("/method/v2/marketplace/")
+        params = {"limit": self.limit, "offset": self.offset}
+        if self.active_category_id is not None:
+            params["category"] = self.active_category_id
+
+        def task():
+            resp = self._api_request_with_retry("GET", url, params=params, timeout=20)
+            if my_gen != self._load_generation:
+                return
+            if resp is None:
+                self.root.after(0, lambda: self._set_status(
+                    "Нет соединения", self.COLORS["danger"]
+                ))
+                return
+            if resp.status_code == 401:
+                self.root.after(0, self._on_token_expired)
+                return
+            try:
+                data = resp.json()
+                results = data.get("results", [])
+                self.root.after(0, lambda: self._on_apps_loaded(results, append, my_gen))
+            except Exception as e:
+                self.root.after(0, lambda: self._set_status(
+                    "Ошибка: " + str(e)[:60], self.COLORS["danger"]
+                ))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_apps_loaded(self, results, append, generation=0):
+        if generation and generation != self._load_generation:
+            return
+
+        self.is_loading = False
+        self.refresh_btn.state(["!disabled"])
+
+        if not append:
+            self._clear_list()
+            self.apps_data = []
+
+        if results:
+            start_index = len(self.apps_data)
+            self.apps_data.extend(results)
+
+            for i, app in enumerate(results):
+                self._render_row(start_index + i, app)
+
+            self.offset += len(results)
+            self._set_status("Загружено приложений: %d" % len(self.apps_data))
+            self.load_more_btn.state(["!disabled"])
+        else:
+            if not append:
+                empty = tk.Label(
+                    self.list_inner, text="Приложений нет",
+                    bg=self.COLORS["surface2"], fg=self.COLORS["subtext"],
+                    font=("Arial", 10), anchor=tk.W
+                )
+                empty.pack(fill=tk.X, padx=8, pady=8)
+                self._row_widgets.append(empty)
+            self.load_more_btn.state(["disabled"])
+            self._set_status("Больше приложений нет")
+
+    def _search_apps(self, query):
+        if not self.token:
+            return
+        self.is_loading = True
+        self._load_generation += 1
+        my_gen = self._load_generation
+
+        self.refresh_btn.state(["disabled"])
+        self.search_btn.state(["disabled"])
+        self.load_more_btn.state(["disabled"])
+        self.offset = 0
+        self._set_status("Поиск: " + query, self.COLORS["accent"])
+
+        url = self._api_url("/method/v2/marketplace/search/")
+        params = {"query": query, "limit": self.limit, "offset": 0}
+        if self.active_category_id is not None:
+            params["category"] = self.active_category_id
+
+        def task():
+            resp = self._api_request_with_retry("GET", url, params=params, timeout=20)
+            if my_gen != self._load_generation:
+                return
+            if resp is None:
+                self.root.after(0, lambda: self._set_status(
+                    "Нет соединения", self.COLORS["danger"]
+                ))
+                return
+            if resp.status_code == 401:
+                self.root.after(0, self._on_token_expired)
+                return
+            try:
+                data = resp.json()
+                results = data.get("results", data.get("hits", []))
+                self.root.after(0, lambda: self._on_search_done(results, query, my_gen))
+            except Exception as e:
+                self.root.after(0, lambda: self._set_status(
+                    "Ошибка поиска: " + str(e)[:60], self.COLORS["danger"]
+                ))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _on_search_done(self, results, query, generation=0):
+        if generation and generation != self._load_generation:
+            return
+
+        self.is_loading = False
+        self.search_btn.state(["!disabled"])
+        self.refresh_btn.state(["!disabled"])
+        self.load_more_btn.state(["disabled"])
+
+        self._clear_list()
+        self.apps_data = results
+        self.offset = len(results)
+
+        if not results:
+            empty = tk.Label(
+                self.list_inner, text="Ничего не найдено по запросу: " + query,
+                bg=self.COLORS["surface2"], fg=self.COLORS["subtext"],
+                font=("Arial", 10), anchor=tk.W
+            )
+            empty.pack(fill=tk.X, padx=8, pady=8)
+            self._row_widgets.append(empty)
+            self._set_status("Ничего не найдено")
+            return
+
+        for i, app in enumerate(results):
+            self._render_row(i, app)
+
+        self._set_status("Найдено: %d" % len(results), self.COLORS["accent2"])
+
+    def _on_token_expired(self):
+        self._set_status("Сессия истекла, войдите заново", self.COLORS["danger"])
+        self._clear_session()
+        self._do_logout()
+
+    def _load_more(self):
+        self._load_apps(append=True)
+
+    # ==================== Иконки ====================
+
+    def _icon_cache_path(self, app_id):
+        return os.path.join(CACHE_DIR, "app_%s.png" % app_id)
+
+    def _get_icon_for_app(self, app):
+        """Возвращает PhotoImage или None."""
+        if not HAS_PIL:
+            return None
+
+        app_id = app.get("id")
+        if not app_id:
+            return None
+
+        icon_url = (
+            app.get("icon") or app.get("logo") or
+            app.get("image") or app.get("icon_url") or ""
+        )
+        if not icon_url:
+            return None
+
+        if icon_url.startswith("/"):
+            icon_url = self.instance_url.get().strip().rstrip("/") + icon_url
+
+        cache_path = self._icon_cache_path(app_id)
+
+        try:
+            if not os.path.isfile(cache_path):
+                if not os.path.isdir(CACHE_DIR):
+                    os.makedirs(CACHE_DIR)
+                resp = requests.get(icon_url, timeout=10, verify=False)
+                if resp.status_code != 200:
+                    return None
+                with open(cache_path, "wb") as f:
+                    f.write(resp.content)
+
+            img = Image.open(cache_path)
+            img = img.convert("RGBA")
+            img.thumbnail(ICON_SIZE, Image.LANCZOS)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    # ==================== Список (Canvas + строки) ====================
+
+    def _clear_list(self):
+        for w in self._row_widgets:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._row_widgets = []
+        self._icon_refs = {}
+        self._selected_index = None
+
+    def _render_row(self, index, app):
+        c = self.COLORS
+        row = tk.Frame(self.list_inner, bg=c["surface2"], cursor="hand2")
+        row.pack(fill=tk.X, pady=1)
+
+        icon_img = self._get_icon_for_app(app)
+        if icon_img is not None:
+            self._icon_refs[index] = icon_img
+            icon_label = tk.Label(row, image=icon_img, bg=c["surface2"], width=24)
+            icon_label.pack(side=tk.LEFT, padx=(6, 4), pady=3)
+        else:
+            placeholder = tk.Label(
+                row, text="▫", bg=c["surface2"], fg=c["subtext"],
+                font=("Arial", 10), width=2
+            )
+            placeholder.pack(side=tk.LEFT, padx=(6, 4), pady=3)
+
+        name_label = tk.Label(
+            row, text=app.get("name", "Без названия"),
+            bg=c["surface2"], fg=c["text"],
+            font=("Arial", 10), anchor=tk.W, justify=tk.LEFT
+        )
+        name_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), pady=3)
+
+        # Биндим клики на все дочерние виджеты и на сам row
+        for widget in [row, name_label] + [w for w in row.winfo_children() if w != name_label]:
+            widget.bind("<Button-1>", lambda e, i=index: self._select_row(i))
+            widget.bind("<Enter>", lambda e, r=row: self._hover_row(r, True))
+            widget.bind("<Leave>", lambda e, r=row: self._hover_row(r, False))
+
+        self._row_widgets.append(row)
+
+    def _hover_row(self, row, entering):
+        c = self.COLORS
+        if self._selected_index is not None:
+            try:
+                if row == self._row_widgets[self._selected_index]:
+                    return
+            except IndexError:
+                pass
+        color = c["surface"] if entering else c["surface2"]
+        try:
+            row.configure(bg=color)
+            for w in row.winfo_children():
+                w.configure(bg=color)
+        except Exception:
+            pass
+
+    def _select_row(self, index):
+        c = self.COLORS
+        # Снимаем с предыдущей
+        if self._selected_index is not None:
+            try:
+                old = self._row_widgets[self._selected_index]
+                old.configure(bg=c["surface2"])
+                for w in old.winfo_children():
+                    w.configure(bg=c["surface2"])
+            except Exception:
+                pass
+
+        self._selected_index = index
+
+        try:
+            row = self._row_widgets[index]
+            row.configure(bg=c["accent"])
+            for w in row.winfo_children():
+                w.configure(bg=c["accent"])
+        except Exception:
+            pass
+
+        if index < len(self.apps_data):
+            self._show_app_details(self.apps_data[index])
+
+    def _show_app_details(self, app):
+        self.selected_app = app
+        self.detail_title.config(text=app.get("name", "Без названия"), fg=self.COLORS["text"])
+
+        meta_parts = []
+        for key, label in [("version", "Версия"), ("size", "Размер"), ("author", "Автор")]:
+            if app.get(key):
+                meta_parts.append("%s: %s" % (label, app[key]))
+        self.detail_meta.config(text="   ".join(meta_parts) or "—")
+
+        desc = app.get("description") or app.get("summary") or "Описание отсутствует"
+        self.detail_desc.config(text=desc[:300] + ("..." if len(desc) > 300 else ""))
+
+        self.download_btn.state(["!disabled"])
+
+    # ==================== Скачивание ====================
+
+    def _download_app(self):
+        if not self.selected_app:
+            return
+        app_id = self.selected_app.get("id")
+        if not app_id:
+            messagebox.showwarning("Внимание", "У приложения нет ID")
+            return
+
+        url = self._api_url("/method/v2/distribution/")
+        params = {"application": app_id}
+        self._set_status("Получение ссылки на скачивание...", self.COLORS["accent"])
+
+        def task():
+            resp = self._api_request_with_retry("GET", url, params=params, timeout=15)
+            if resp is None:
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", "Нет соединения"))
+                return
+            try:
+                data = resp.json()
+                results = data.get("results", [])
+                if not results:
+                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет доступных файлов"))
+                    return
+                dist = results[0]
+                link = dist.get("file") or dist.get("url") or ""
+                if link:
+                    self.root.after(0, lambda: self._open_download(link))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("Инфо", "Нет ссылки на файл"))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Ошибка", str(e)[:100]))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _open_download(self, url):
+        import webbrowser
+        webbrowser.open(url)
+        self._set_status("Ссылка открыта в браузере", self.COLORS["accent2"])
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = LunaStoreProduct(root)
+    root.mainloop()
