@@ -1,0 +1,750 @@
+Держи! Вот **полный `main.py` под Python 3.4.4** — без f-строк, с `resource_path()` для `.exe`, с рабочим веб-сервером. Плюс `build.bat` для сборки.
+
+---
+
+## 📁 Структура проекта
+
+```
+windows_setup_hub_xp/
+├── main.py              ← этот файл
+├── build.bat            ← сборка .exe
+└── templates/
+    ├── index.html
+    ├── style.css
+    └── script.js        ← ES5 для IE8
+```
+
+---
+
+## 1. `main.py` — полная версия под Python 3.4.4
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Windows Setup Hub - версия для Windows XP SP3
+Python 3.4.4, без f-строк, с поддержкой .exe
+"""
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import webbrowser
+import threading
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import os
+import sys
+import socket
+import time
+import traceback
+
+
+# ==================== RESOURCE PATH ====================
+def resource_path(relative):
+    """Путь к ресурсу - работает и в .py, и в .exe."""
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative)
+
+
+# ==================== КАТЕГОРИИ ====================
+CATEGORIES = {
+    "msdos":    ("MS-DOS",                "#0000AA"),
+    "win_old":  ("Windows (ранние)",      "#008080"),
+    "win_nt":   ("Windows NT / 2000",     "#3A6EA5"),
+    "win_lost": ("Windows (отменённые)",  "#5A2D82"),
+    "win_mod":  ("Windows (современные)", "#0078D7"),
+}
+
+# ==================== ВЕРСИИ ====================
+ALL_VERSIONS = {
+    "msdos":     ("MS-DOS",             "1981-2000", "msdos",   "Классическая дисковая ОС Microsoft."),
+    "win1":      ("Windows 1.0",        "1985",      "win_old", "Первая Windows. Менеджер окон над DOS."),
+    "win2x":     ("Windows 2.x",        "1987",      "win_old", "Окна с перекрытием."),
+    "win3":      ("Windows 3.0 / 3.1",  "1990-1992", "win_old", "Массовая GUI-среда для DOS."),
+    "win95":     ("Windows 95",         "1995",      "win_old", "Start Menu, 32-bit, Plug and Play."),
+    "win98":     ("Windows 98",         "1998",      "win_old", "IE-интеграция, USB, FAT32."),
+    "winme":     ("Windows Me",         "2000",      "win_old", "Millennium Edition."),
+    "nt3x":      ("Windows NT 3.x",     "1993-1994", "win_nt",  "Первая NT-линейка."),
+    "nt4":       ("Windows NT 4.0",     "1996",      "win_nt",  "NT с интерфейсом Windows 95."),
+    "win2000":   ("Windows 2000",       "2000",      "win_nt",  "NT 5.0 - бизнес-ОС."),
+    "longhorn":  ("Windows Longhorn",   "2001-2004", "win_lost","Отменённый проект, лёг в основу Vista."),
+    "nashville": ("Windows Nashville",  "1996",      "win_lost","Отменённый гибрид 95 и IE4."),
+    "neptune":   ("Windows Neptune",    "1999",      "win_lost","Отменённая домашняя NT-версия."),
+    "whistler":  ("Windows Whistler",   "2000",      "win_lost","Кодовое имя Windows XP."),
+    "winframe":  ("WinFrame",           "1995",      "win_lost","Citrix + NT 3.51 терминал-сервер."),
+    "backoffice":("BackOffice Server",  "1997",      "win_lost","Серверный пакет Microsoft."),
+    "xp":        ("Windows XP",         "2001",      "win_mod", "Luna UI, NT-ядро."),
+    "vista":     ("Windows Vista",      "2007",      "win_mod", "Aero, UAC."),
+    "win7":      ("Windows 7",          "2009",      "win_mod", "Aero, UAC, любимая ОС 2010-х."),
+    "win8":      ("Windows 8",          "2012",      "win_mod", "Metro UI, плитки."),
+    "win81":     ("Windows 8.1",        "2013",      "win_mod", "Возврат кнопки Пуск."),
+    "win10":     ("Windows 10",         "2015",      "win_mod", "WaaS, WSL, Cortana."),
+    "win10cn":   ("Windows 10 (CN)",    "2015",      "win_mod", "Китайская редакция."),
+    "win11":     ("Windows 11",         "2021",      "win_mod", "TPM 2.0, новый UI."),
+}
+
+# ==================== ССЫЛКИ ====================
+LINKS = {
+    "msdos":     [("MS-DOS 6.22", "https://winworldpc.com/product/ms-dos/622")],
+    "win1":      [("Windows 1.01", "https://winworldpc.com/product/windows-10/101")],
+    "win2x":     [("Windows 2.x", "https://winworldpc.com/product/windows-20/2x")],
+    "win3":      [("Windows 3.1", "https://winworldpc.com/product/windows-3/31")],
+    "win95":     [("Windows 95 OSR2", "https://winworldpc.com/product/windows-95/osr-2")],
+    "win98":     [("Windows 98 SE", "https://winworldpc.com/product/windows-98/se")],
+    "winme":     [("Windows Me", "https://winworldpc.com/product/windows-me")],
+    "nt3x":      [("Windows NT 3.51", "https://winworldpc.com/product/windows-nt-3/351")],
+    "nt4":       [("Windows NT 4.0", "https://winworldpc.com/product/windows-nt-4")],
+    "win2000":   [("Windows 2000", "https://winworldpc.com/product/windows-2000/pro")],
+    "longhorn":  [("Longhorn (сборки)", "https://winworldpc.com/product/windows-longhorn")],
+    "nashville": [("Nashville (BetaWiki)", "https://betawiki.net/wiki/Windows_Nashville")],
+    "neptune":   [("Neptune (BetaWiki)", "https://betawiki.net/wiki/Windows_Neptune")],
+    "whistler":  [("Whistler (BetaWiki)", "https://betawiki.net/wiki/Windows_Whistler")],
+    "winframe":  [("WinFrame (Wikipedia)", "https://en.wikipedia.org/wiki/WinFrame")],
+    "backoffice":[("BackOffice (Wikipedia)", "https://en.wikipedia.org/wiki/BackOffice_Server")],
+    "xp":        [("Windows XP SP3", "https://archive.org/details/WinXPProSP3x86")],
+    "vista":     [("Windows Vista SP2", "https://winworldpc.com/product/windows-vista")],
+    "win7":      [("Windows 7 SP1", "https://archive.org/details/windows-7-sp1")],
+    "win8":      [("Windows 8", "https://archive.org/details/windows-8")],
+    "win81":     [("Windows 8.1", "https://archive.org/details/windows-8.1")],
+    "win10":     [("Windows 10 (Microsoft)", "https://www.microsoft.com/ru-ru/software-download/windows10")],
+    "win10cn":   [("Windows 10 CN", "https://www.microsoft.com/zh-cn/software-download/windows10")],
+    "win11":     [("Windows 11 (Microsoft)", "https://www.microsoft.com/en-us/software-download/windows11")],
+}
+
+# ==================== ТРЕБОВАНИЯ ====================
+REQS = {
+    "msdos":   "CPU: 8086 · RAM: 64-640 KB · Флоппи · BIOS",
+    "win1":    "CPU: 8088 · RAM: 256 KB · 2 дисковода · DOS 2.0+",
+    "win2x":   "CPU: 286 · RAM: 512 KB-1 MB · HDD 5 MB",
+    "win3":    "CPU: 286+ · RAM: 1-2 MB · HDD: 10 MB · Мышь",
+    "win95":   "CPU: 386DX · RAM: 4-8 MB · HDD: 50 MB · VGA",
+    "win98":   "CPU: 486DX/66 · RAM: 16 MB · HDD: 200 MB · USB",
+    "winme":   "CPU: Pentium 150 · RAM: 32 MB · HDD: 320 MB",
+    "nt3x":    "CPU: 386 · RAM: 12-16 MB · HDD: 90 MB",
+    "nt4":     "CPU: Pentium 90 · RAM: 32 MB · HDD: 200 MB",
+    "win2000": "CPU: Pentium 133 · RAM: 64 MB · HDD: 650 MB",
+    "longhorn": "CPU: Pentium III · RAM: 256 MB · HDD: 4 GB · DX9",
+    "nashville":"CPU: 486 · RAM: 8 MB · HDD: 100 MB (не выпущен)",
+    "neptune":  "CPU: Pentium · RAM: 32 MB · HDD: 500 MB (не выпущен)",
+    "whistler": "CPU: Pentium II · RAM: 128 MB · HDD: 2 GB",
+    "winframe": "CPU: Pentium · RAM: 64 MB · HDD: 1 GB · Citrix",
+    "backoffice":"CPU: Pentium II · RAM: 128 MB · HDD: 2 GB",
+    "xp":      "CPU: Pentium 233 MHz · RAM: 64 MB · HDD: 1.5 GB",
+    "vista":   "CPU: 1 GHz · RAM: 1 GB · HDD: 15 GB · DX9",
+    "win7":    "CPU: 1 GHz · RAM: 1 GB · HDD: 16 GB · DX9",
+    "win8":    "CPU: 1 GHz · RAM: 1 GB · HDD: 16 GB",
+    "win81":   "CPU: 1 GHz · RAM: 1 GB · HDD: 16 GB",
+    "win10":   "CPU: 1 GHz · RAM: 4 GB · HDD: 32 GB · UEFI + Secure Boot",
+    "win10cn": "CPU: 1 GHz · RAM: 4 GB · HDD: 32 GB · UEFI · CN",
+    "win11":   "CPU: 1 GHz 2 ядра 64-bit · RAM: 4 GB · HDD: 64 GB · TPM 2.0 · UEFI + Secure Boot · DX12",
+}
+
+# ==================== ОПИСАНИЯ ====================
+DESCRIPTIONS = {
+    "msdos": (
+        "MS-DOS (1981-2000)\n\n"
+        "1981 год. Сиэтл. Никому не известная компания Microsoft покупает\n"
+        "у Seattle Computer Products операционную систему 86-DOS за сумму\n"
+        "около 50 000 долларов. Никто тогда не догадывался, что эта сделка\n"
+        "определит облик персональных компьютеров на 15 лет вперёд.\n\n"
+        "Это была не Windows. Это был чёрный экран и белый курсор.\n"
+        "Чтобы запустить программу, нужно было помнить десятки команд:\n"
+        "DIR, CD, COPY, FORMAT, FDISK. Ошибка в букве - и компьютер\n"
+        "молча ждал, пока пользователь поймёт, что пошло не так.\n\n"
+        "Билл Гейтс (1981): «Я не думал, что DOS проживёт больше года.\n"
+        "Но она стала стандартом на 15 лет вперёд»."
+    ),
+    "win1": (
+        "Windows 1.0 (1985)\n\n"
+        "10 ноября 1983 года Лас-Вегас. Выставка COMDEX. Билл Гейтс\n"
+        "выходит на сцену и объявляет о «Windows» - надстройке над DOS,\n"
+        "которая сделает ПК понятным каждому. Зал замирает.\n\n"
+        "Но релиз случается только 20 ноября 1985 года - почти через два\n"
+        "года. И это не операционная система. Это оконный менеджер над DOS.\n"
+        "Окна не перекрываются - только мозаика. В комплекте - Paint, Write,\n"
+        "Calculator, Clock и игра Reversi.\n\n"
+        "Стив Балмер: «Windows 1.0 была невероятно медленной.\n"
+        "Но это был правильный путь»."
+    ),
+    "win2x": (
+        "Windows 2.x (1987)\n\n"
+        "1987 год. Microsoft выпускает вторую версию - и совершает\n"
+        "революцию: окна наконец-то могут перекрывать друг друга.\n"
+        "Появляются иконки и первые зачатки рабочего стола.\n\n"
+        "Из судебного дела Apple vs Microsoft:\n"
+        "«Идея оконного интерфейса не может быть монополизирована»."
+    ),
+    "win3": (
+        "Windows 3.0 / 3.1 (1990-1992)\n\n"
+        "22 мая 1990 года. Нью-Йорк. Microsoft устраивает шоу с дымом,\n"
+        "лазерами и оркестром. На сцену выходит Windows 3.0 - и это уже\n"
+        "не эксперимент, а заявление на весь рынок. Продано 10 миллионов\n"
+        "копий за два года.\n\n"
+        "PC Magazine (1990): «Windows 3.0 - это будущее ПК. DOS остался\n"
+        "в прошлом»."
+    ),
+    "win95": (
+        "Windows 95 (1995)\n\n"
+        "24 августа 1995 года. Редмонд, штат Вашингтон. Воздух буквально\n"
+        "дрожит от напряжения. На огромной сцене Билл Гейтс и популярный\n"
+        "комик Джей Лено готовятся перевернуть мир, показав операционную\n"
+        "систему нового поколения - Windows 95.\n\n"
+        "Компьютеры той эпохи всё ещё оставались пугающими машинами для\n"
+        "гиков, где для любого действия нужно было вбивать сложные текстовые\n"
+        "команды в чёрное окно DOS. Microsoft должна была доказать, что\n"
+        "теперь ПК понятен абсолютно каждому.\n\n"
+        "Под оглушительные аккорды культовой песни The Rolling Stones на\n"
+        "экранах появляется обновлённый интерфейс. Гейтс делает один клик,\n"
+        "и миллионы людей по всему миру замирают. Из динамиков звучит\n"
+        "главный лозунг рекламной кампании:\n"
+        "«Where do you want to go today? Start here.»\n\n"
+        "Этой точкой старта стала легендарная кнопка «Пуск» (Start).\n"
+        "Джей Лено иронично подмечает, что Гейтс наконец-то создал систему,\n"
+        "в которой даже комику не нужен проводник, чтобы найти текстовый\n"
+        "редактор. Один клик - и перед пользователем открывается весь мир.\n\n"
+        "Правда, без порции доброго юмора не обошлось. Чтобы выключить этот\n"
+        "суперсовременный компьютер, пользователю первым делом нужно\n"
+        "было нажать на кнопку… «Пуск».\n\n"
+        "Тем не менее, магия сработала. Трек «Start Me Up» гремел из\n"
+        "каждого утюга, а кнопка в левом нижнем углу экрана навсегда\n"
+        "изменила то, как человечество взаимодействует с технологиями.\n\n"
+        "Рекламный слоган 1995 года. Продано 1 млн копий за 4 дня.\n"
+        "Кодовое имя - Chicago."
+    ),
+    "win98": (
+        "Windows 98 (1998)\n\n"
+        "25 июня 1998 года. Атланта. Windows 98 выходит под лозунгом\n"
+        "«Works better, plays better» - «Работает лучше, играет лучше».\n\n"
+        "Это первая Windows, где интернет встроен прямо в рабочий стол.\n"
+        "Internet Explorer 4 сливается с системой. Появляются USB, DVD,\n"
+        "ACPI, поддержка нескольких мониторов.\n\n"
+        "Билл Гейтс на презентации (1998): «Именно поэтому мы ещё не\n"
+        "выпустили Windows 98» - после показа синего экрана смерти."
+    ),
+    "winme": (
+        "Windows Me (2000)\n\n"
+        "14 сентября 2000 года. Миллениум на дворе. Microsoft выпускает\n"
+        "Windows Millennium Edition - «домашнюю» ОС для мультимедиа.\n\n"
+        "Что обещали: System Restore, Movie Maker, Windows Media Player 7.\n"
+        "Что убрали: реальную DOS-консоль.\n\n"
+        "PC World (2000): «Me - это Windows 98 с новыми обоями\n"
+        "и старыми проблемами»."
+    ),
+    "nt3x": (
+        "Windows NT 3.x (1993-1994)\n\n"
+        "27 июля 1993 года. Microsoft выпускает нечто совершенно иное.\n"
+        "Не надстройку над DOS, а полноценную операционную систему,\n"
+        "написанную с нуля. Её называют Windows NT - New Technology.\n\n"
+        "Дэйв Катлер: «Мы строили ОС, которая должна была работать\n"
+        "20 лет. Она работает уже 30»."
+    ),
+    "nt4": (
+        "Windows NT 4.0 (1996)\n\n"
+        "24 августа 1996 года. Ровно через год после Windows 95 Microsoft\n"
+        "выпускает NT 4.0 - и делает то, чего ждали все: переносит\n"
+        "интерфейс Windows 95 на надёжное NT-ядро.\n\n"
+        "Из документации Microsoft (1996): «NT 4.0 - самая надёжная\n"
+        "ОС для бизнеса»."
+    ),
+    "win2000": (
+        "Windows 2000 (2000)\n\n"
+        "17 февраля 2000 года. Сан-Франциско. Стив Балмер выходит на\n"
+        "сцену и произносит фразу, которая войдёт в историю Microsoft.\n\n"
+        "Стив Балмер (2000): «Windows 2000 - самая важная ОС за всю\n"
+        "историю Microsoft»."
+    ),
+    "longhorn": (
+        "Windows Longhorn (2001-2004)\n\n"
+        "2001 год. Microsoft анонсирует самую амбициозную ОС в своей\n"
+        "истории. Кодовое имя - Longhorn. WinFS, Avalon, Indigo, Sidebar.\n\n"
+        "Джим Олчин (вице-президент Microsoft): «Longhorn упал под\n"
+        "собственной тяжестью»."
+    ),
+    "nashville": (
+        "Windows Nashville (1996)\n\n"
+        "1996 год. Microsoft запускает проект Nashville - гибрид\n"
+        "Windows 95 и Internet Explorer 4.\n\n"
+        "Из внутренних документов Microsoft: «Nashville был слишком\n"
+        "ранним для своего времени»."
+    ),
+    "neptune": (
+        "Windows Neptune (1999)\n\n"
+        "1999 год. Microsoft готовит Windows 2000 для бизнеса - но что\n"
+        "делать дома? Ответ: проект Neptune, «домашняя» версия NT.\n\n"
+        "Из интервью инженера Microsoft: «Neptune должен был убить\n"
+        "линейку 9x раньше»."
+    ),
+    "whistler": (
+        "Windows Whistler (2000)\n\n"
+        "2000 год. Microsoft объединяет две разрозненные линейки -\n"
+        "домашнюю 9x и корпоративную NT - в одну.\n\n"
+        "Билл Гейтс (2001): «Whistler - это конец эры DOS»."
+    ),
+    "winframe": (
+        "Citrix WinFrame (1995)\n\n"
+        "1995 год. Citrix Systems берёт Windows NT 3.51 и добавляет\n"
+        "свою технологию MultiWin.\n\n"
+        "Эд Иакобуччи (Citrix): «WinFrame показал, что Windows может\n"
+        "обслуживать сотни пользователей с одного сервера»."
+    ),
+    "backoffice": (
+        "Microsoft BackOffice Server (1997)\n\n"
+        "1997 год. Microsoft собирает всё лучшее для бизнеса\n"
+        "в один пакет - BackOffice Server.\n\n"
+        "Из маркетинга Microsoft (1997): «BackOffice - всё, что нужно\n"
+        "бизнесу, в одной коробке»."
+    ),
+    "xp": (
+        "Windows XP (2001)\n\n"
+        "25 октября 2001 года. Нью-Йорк. Через полтора месяца после\n"
+        "трагедии 11 сентября Microsoft проводит презентацию новой ОС.\n"
+        "Атмосфера в зале - особенная. Так рождается Windows XP.\n\n"
+        "Синий интерфейс Luna, зелёная кнопка «Пуск», скруглённые углы.\n"
+        "NT-ядро становится массовым. XP продержалась в поддержке 13 лет.\n\n"
+        "Билл Гейтс (2001): «XP - это Windows, какой она должна была\n"
+        "быть с самого начала»."
+    ),
+    "vista": (
+        "Windows Vista (2007)\n\n"
+        "30 января 2007 года. Нью-Йорк. После пяти лет разработки -\n"
+        "самой долгой в истории Microsoft - выходит Windows Vista.\n\n"
+        "Стив Балмер (2007): «Vista была слишком смелой для своего\n"
+        "времени»."
+    ),
+    "win7": (
+        "Windows 7 (2009)\n\n"
+        "22 октября 2009 года. Нью-Йорк. Стив Балмер выходит на сцену\n"
+        "и произносит фразу, которую ждали миллионы.\n\n"
+        "Стив Балмер (2009): «7 - это Windows, которую ждали»."
+    ),
+    "win8": (
+        "Windows 8 (2012)\n\n"
+        "26 октября 2012 года. Microsoft делает самую рискованную\n"
+        "ставку в своей истории. Metro UI: вместо рабочего стола - плитки.\n\n"
+        "Стив Балмер после ухода (2013): «Windows 8 - моя самая\n"
+        "большая ошибка»."
+    ),
+    "win81": (
+        "Windows 8.1 (2013)\n\n"
+        "17 октября 2013 года. Microsoft выпускает обновление,\n"
+        "которое должно было исправить репутацию Windows 8.\n\n"
+        "Из блога Microsoft (2013): «8.1 - это Windows 8, услышавшая\n"
+        "пользователей»."
+    ),
+    "win10": (
+        "Windows 10 (2015)\n\n"
+        "29 июля 2015 года. Найроби, Кения. Microsoft впервые проводит\n"
+        "презентацию Windows не в США, а в Африке.\n\n"
+        "Сатья Наделла (2015): «Windows 10 - это первый шаг к 1\n"
+        "миллиарду устройств»."
+    ),
+    "win10cn": (
+        "Windows 10 (китайская редакция, 2015)\n\n"
+        "2015 год. Китай - второй по величине рынок ПК в мире.\n"
+        "Microsoft выпускает специальную редакцию Windows 10 для КНР.\n\n"
+        "Из пресс-релиза Microsoft China (2015): «Мы адаптируем\n"
+        "Windows 10 под потребности китайского рынка»."
+    ),
+    "win11": (
+        "Windows 11 (2021)\n\n"
+        "24 июня 2021 года. Microsoft проводит онлайн-презентацию.\n"
+        "Панус Паннай объявляет: «Windows 11 - это переосмысление\n"
+        "Windows для гибридной работы».\n\n"
+        "Панус Паннай (2021): «Windows 11 - это переосмысление\n"
+        "Windows для гибридной работы»."
+    ),
+}
+
+
+# ==================== ВЕБ-СЕРВЕР ====================
+def find_free_port(start=8080, end=8100):
+    """Ищет свободный порт в диапазоне."""
+    for port in range(start, end + 1):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+            s.close()
+            return port
+        except OSError:
+            s.close()
+            continue
+    raise RuntimeError("Нет свободных портов в {0}-{1}".format(start, end))
+
+
+class WebHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        templates = resource_path("templates")
+        SimpleHTTPRequestHandler.__init__(self, *args, directory=templates, **kwargs)
+
+    def log_message(self, fmt, *args):
+        print("[WEB] {0} - {1}".format(self.address_string(), fmt % args))
+
+
+def start_web_server():
+    """Запускает веб-сервер и открывает браузер."""
+    templates = resource_path("templates")
+
+    if not os.path.exists(templates):
+        print("Папка не найдена: {0}".format(templates))
+        return
+
+    index = os.path.join(templates, "index.html")
+    if not os.path.exists(index):
+        print("Файл не найден: {0}".format(index))
+        return
+
+    try:
+        port = find_free_port()
+    except RuntimeError as e:
+        print("Ошибка: {0}".format(e))
+        return
+
+    print("[WEB] Запуск сервера на http://127.0.0.1:{0}/".format(port))
+    print("[WEB] Директория: {0}".format(templates))
+
+    try:
+        server = HTTPServer(("127.0.0.1", port), WebHandler)
+    except Exception as e:
+        print("Не удалось создать сервер: {0}".format(e))
+        traceback.print_exc()
+        return
+
+    url = "http://127.0.0.1:{0}/index.html".format(port)
+
+    def open_browser():
+        time.sleep(0.8)
+        print("[WEB] Открываю браузер: {0}".format(url))
+        webbrowser.open(url)
+
+    t = threading.Thread(target=open_browser)
+    t.daemon = True
+    t.start()
+
+    print("[WEB] Сервер готов.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[WEB] Сервер остановлен.")
+
+
+# ==================== GUI ====================
+class SetupHub(object):
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Windows Setup Hub")
+        self.root.geometry("1100x720")
+        self.root.configure(bg="#2D2D30")
+        self.build_main()
+
+    def clear(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+
+    def build_main(self):
+        self.clear()
+        self.root.configure(bg="#2D2D30")
+
+        tk.Label(self.root, text="Windows Setup Hub",
+                 font=("Segoe UI", 22, "bold"),
+                 bg="#2D2D30", fg="#FFFFFF").pack(pady=15)
+        tk.Label(self.root, text="Хронология ОС Microsoft - от MS-DOS до Windows 11",
+                 font=("Segoe UI", 11),
+                 bg="#2D2D30", fg="#CCCCCC").pack()
+
+        frame = tk.Frame(self.root, bg="#2D2D30")
+        frame.pack(pady=25, fill="both", expand=True, padx=30)
+
+        colors = {
+            "msdos":    "#0000AA",
+            "win_old":  "#008080",
+            "win_nt":   "#3A6EA5",
+            "win_lost": "#5A2D82",
+            "win_mod":  "#0078D7",
+        }
+
+        i = 0
+        for key, cat in CATEGORIES.items():
+            name = cat[0]
+            color = colors[key]
+            card = tk.Frame(frame, bg=color, cursor="hand2")
+            row = i // 3
+            col = i % 3
+            card.grid(row=row, column=col, padx=10, pady=10,
+                      sticky="nsew", ipadx=20, ipady=25)
+
+            tk.Label(card, text=name, font=("Segoe UI", 13, "bold"),
+                     bg=color, fg="#FFFFFF", wraplength=200).pack(expand=True)
+
+            count = 0
+            for v in ALL_VERSIONS.values():
+                if v[2] == key:
+                    count += 1
+            tk.Label(card, text="{0} версий".format(count),
+                     font=("Segoe UI", 9), bg=color, fg="#EEEEEE").pack()
+
+            card.bind("<Button-1>", lambda e, k=key: self.build_category(k))
+            for ch in card.winfo_children():
+                ch.bind("<Button-1>", lambda e, k=key: self.build_category(k))
+            i += 1
+
+        for c in range(3):
+            frame.grid_columnconfigure(c, weight=1)
+
+        bottom = tk.Frame(self.root, bg="#2D2D30")
+        bottom.pack(pady=15)
+
+        tk.Button(bottom, text="Web Info OS",
+                  command=self.open_web_info,
+                  bg="#1E1E1E", fg="#00FF00", font=("Segoe UI", 11),
+                  relief="flat", padx=20, pady=8).pack(side="left", padx=5)
+        tk.Button(bottom, text="Выход", command=self.root.quit,
+                  bg="#C42B1C", fg="white", font=("Segoe UI", 11),
+                  relief="flat", padx=20, pady=8).pack(side="left", padx=5)
+
+    def open_web_info(self):
+        t = threading.Thread(target=start_web_server)
+        t.daemon = True
+        t.start()
+
+    def build_category(self, cat_key):
+        self.clear()
+        name = CATEGORIES[cat_key][0]
+        color = CATEGORIES[cat_key][1]
+        self.root.configure(bg="#2D2D30")
+
+        top = tk.Frame(self.root, bg=color, height=60)
+        top.pack(fill="x")
+        tk.Label(top, text="  {0}".format(name), font=("Segoe UI", 16, "bold"),
+                 bg=color, fg="#FFFFFF").pack(side="left", padx=15, pady=15)
+        tk.Button(top, text="< Назад", command=self.build_main,
+                  bg="#333", fg="white", relief="flat", padx=15).pack(side="right", padx=10, pady=10)
+
+        canvas = tk.Canvas(self.root, bg="#2D2D30", highlightthickness=0)
+        scroll = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg="#2D2D30")
+
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scroll.pack(side="right", fill="y")
+
+        for key, v in ALL_VERSIONS.items():
+            vname, year, vcat, desc = v
+            if vcat != cat_key:
+                continue
+            row = tk.Frame(inner, bg="#3A3A3D", cursor="hand2")
+            row.pack(fill="x", pady=4, padx=5, ipady=8)
+            tk.Label(row, text="  {0}".format(vname), font=("Segoe UI", 12, "bold"),
+                     bg="#3A3A3D", fg="#FFFFFF", anchor="w").pack(fill="x", padx=10)
+            tk.Label(row, text="     {0} - {1}".format(year, desc),
+                     font=("Segoe UI", 9), bg="#3A3A3D", fg="#CCCCCC",
+                     anchor="w").pack(fill="x", padx=10)
+            row.bind("<Button-1>", lambda e, k=key: self.build_version(k))
+            for ch in row.winfo_children():
+                ch.bind("<Button-1>", lambda e, k=key: self.build_version(k))
+
+    def build_version(self, key):
+        v = ALL_VERSIONS[key]
+        vname = v[0]
+        year = v[1]
+        vcat = v[2]
+        desc = v[3]
+
+        colors = {
+            "msdos":    "#0000AA",
+            "win_old":  "#008080",
+            "win_nt":   "#3A6EA5",
+            "win_lost": "#5A2D82",
+            "win_mod":  "#0078D7",
+        }
+        vcolor = colors.get(vcat, "#0078D7")
+
+        self.clear()
+        self.root.configure(bg="#2D2D30")
+
+        top = tk.Frame(self.root, bg=vcolor, height=70)
+        top.pack(fill="x")
+        tk.Label(top, text="  {0}  ({1})".format(vname, year),
+                 font=("Segoe UI", 16, "bold"),
+                 bg=vcolor, fg="#FFFFFF").pack(side="left", padx=15, pady=18)
+        tk.Button(top, text="< Назад",
+                  command=lambda: self.build_category(vcat),
+                  bg="#333", fg="white", relief="flat", padx=15).pack(side="right", padx=10, pady=15)
+
+        # Прокрутка
+        canvas = tk.Canvas(self.root, bg="#2D2D30", highlightthickness=0)
+        scroll = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        body = tk.Frame(canvas, bg="#2D2D30")
+
+        body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scroll.pack(side="right", fill="y")
+
+        tk.Label(body, text=desc, font=("Segoe UI", 11),
+                 bg="#2D2D30", fg="#FFFFFF",
+                 wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
+
+        # Описание
+        if key in DESCRIPTIONS:
+            df = tk.LabelFrame(body, text=" Описание ",
+                                font=("Segoe UI", 10),
+                                bg="#2D2D30", fg="#00FFAA")
+            df.pack(fill="x", pady=8)
+            dt = scrolledtext.ScrolledText(df, height=14,
+                                             font=("Consolas", 9),
+                                             bg="#0F1A0F", fg="#CCFFCC",
+                                             relief="flat", wrap="word")
+            dt.pack(fill="both", expand=True, padx=8, pady=8)
+            dt.insert("1.0", DESCRIPTIONS[key])
+            dt.configure(state="disabled")
+
+        # Требования
+        rf = tk.LabelFrame(body, text=" Требования ",
+                            font=("Segoe UI", 10),
+                            bg="#2D2D30", fg="#00BFFF")
+        rf.pack(fill="x", pady=8)
+        req = REQS.get(key, "Не указаны")
+        tk.Label(rf, text=req, font=("Segoe UI", 10),
+                 bg="#2D2D30", fg="#DDDDDD",
+                 wraplength=900, justify="left").pack(anchor="w", padx=10, pady=8)
+
+        # Ссылки
+        lf = tk.LabelFrame(body, text=" Ссылки ",
+                            font=("Segoe UI", 10),
+                            bg="#2D2D30", fg="#00FF00")
+        lf.pack(fill="x", pady=8)
+        if key in LINKS:
+            for lname, lurl in LINKS[key]:
+                row = tk.Frame(lf, bg="#2D2D30")
+                row.pack(fill="x", padx=10, pady=3)
+                tk.Button(row, text="> {0}".format(lname),
+                          font=("Segoe UI", 10),
+                          bg=vcolor, fg="#FFFFFF",
+                          relief="raised", bd=1, anchor="w",
+                          padx=10, pady=5,
+                          command=lambda u=lurl: webbrowser.open(u)).pack(fill="x")
+                display = lurl
+                if len(lurl) > 90:
+                    display = lurl[:87] + "..."
+                tk.Label(row, text="   {0}".format(display),
+                         font=("Consolas", 8),
+                         bg="#2D2D30", fg="#888888",
+                         anchor="w").pack(fill="x")
+
+
+def main():
+    app = SetupHub()
+    app.root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## 2. `build.bat` — сборка `.exe` под XP
+
+Создайте в корне проекта:
+
+```batch
+@echo off
+chcp 65001 >nul
+echo ============================================================
+echo   СБОРКА WINDOWS SETUP HUB В .EXE (Windows XP)
+echo ============================================================
+echo.
+
+REM Проверка Python
+C:\Python34\python.exe --version >nul 2>&1
+if errorlevel 1 (
+    echo [ОШИБКА] Python 3.4.4 не найден в C:\Python34\
+    echo Скачайте: https://www.python.org/ftp/python/3.4.4/python-3.4.4.msi
+    pause
+    exit /b 1
+)
+
+echo Python найден:
+C:\Python34\python.exe --version
+echo.
+
+REM Установка PyInstaller 3.2.1 (последний для XP)
+echo [1/3] Установка PyInstaller 3.2.1...
+C:\Python34\python.exe -m pip install pyinstaller==3.2.1
+echo.
+
+REM Очистка
+echo [2/3] Очистка старых сборок...
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
+if exist *.spec del /q *.spec
+echo.
+
+REM Сборка
+echo [3/3] Сборка .exe...
+C:\Python34\python.exe -m PyInstaller ^
+    --onefile ^
+    --windowed ^
+    --name="WindowsSetupHubXP" ^
+    --add-data "templates;templates" ^
+    main.py
+
+echo.
+if exist "dist\WindowsSetupHubXP.exe" (
+    echo ============================================================
+    echo   ГОТОВО!
+    echo   Файл: dist\WindowsSetupHubXP.exe
+    echo ============================================================
+) else (
+    echo ============================================================
+    echo   ОШИБКА СБОРКИ
+    echo   Проверьте вывод выше
+    echo ============================================================
+)
+
+pause
+```
+
+---
+
+## 3. Что дальше
+
+Файлы `templates/index.html`, `templates/style.css`, `templates/script.js` — **те же**, что я присылал ранее, но **с оговоркой**:
+
+- ❌ **`<video>` не заработает в IE8** (на XP) — будет виден только текст «Ваш браузер не поддерживает видео»
+- ✅ **Работает в Firefox 52 ESR** — если поставите его на XP, видео покажется
+- ✅ **Текст, ссылки, описания** — работают везде
+
+### Если хотите, чтобы **видео работало и на IE8**:
+
+Замените в `index.html` блок с `<video>` на:
+
+```html
+<div class="video-panel">
+    <h3>Видео</h3>
+    <p>Название видео</p>
+    <p>
+        <a href="URL_видео" target="_blank">
+            Смотреть в Internet Archive (откроется в браузере) →
+        </a>
+    </p>
+</div>
+```
+
+Тогда на XP будет **кнопка-ссылка**, которая откроет видео на сайте Archive.org.
+
+---
+
+## ✅ Чек-лист сборки
+
+- [ ] Python 3.4.4 установлен в `C:\Python34\`
+- [ ] Папка `templates/` рядом с `main.py`
+- [ ] Внутри `templates/`: `index.html`, `style.css`, `script.js`
+- [ ] Запустили `build.bat`
+- [ ] Получили `dist\WindowsSetupHubXP.exe`
+- [ ] Скопировали `.exe` на XP, запустили
+
+Если `build.bat` ругается — пришлите вывод консоли, поправлю.
