@@ -1,0 +1,112 @@
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QRadioButton, QHBoxLayout, QGroupBox, QPushButton, QButtonGroup
+from random import shuffle
+
+app = QApplication([])
+main_win = QWidget()
+main_win.setWindowTitle("Memo card")
+main_win.resize(450, 300)
+
+MAINtext = QLabel()
+MAINtext.setAlignment(Qt.AlignCenter)
+MAINtext.setWordWrap(True)
+
+RadioGroupBox = QGroupBox("Варианты:")
+button1 = QRadioButton()
+button2 = QRadioButton()
+button3 = QRadioButton()
+button4 = QRadioButton()
+
+RadioGroup = QButtonGroup()
+RadioGroup.addButton(button1)
+RadioGroup.addButton(button2)
+RadioGroup.addButton(button3)
+RadioGroup.addButton(button4)
+
+layout1 = QHBoxLayout()
+col1 = QVBoxLayout()
+col2 = QVBoxLayout()
+col1.addWidget(button1)
+col1.addWidget(button2)
+col2.addWidget(button3)
+col2.addWidget(button4)
+layout1.addLayout(col1)
+layout1.addLayout(col2)
+RadioGroupBox.setLayout(layout1)
+
+ansGroupBox = QGroupBox("Результат теста:")
+winlabel = QLabel("")
+winlabel.setAlignment(Qt.AlignCenter)
+layout2 = QHBoxLayout()
+layout2.addWidget(winlabel)
+ansGroupBox.setLayout(layout2)
+ansGroupBox.hide()
+
+Otv_Button = QPushButton("Ответить")
+Otv_Button.setMinimumHeight(35)
+
+liner = QVBoxLayout()
+liner.setContentsMargins(20, 20, 20, 20)
+liner.setSpacing(15)
+liner.addWidget(MAINtext, alignment=Qt.AlignCenter)
+liner.addWidget(RadioGroupBox)
+liner.addWidget(ansGroupBox)
+liner.addWidget(Otv_Button)
+main_win.setLayout(liner)
+
+questions = [
+    ("Какой национальности не существует?", "Смурфы", "Энцы", "Чулымцы", "Алеуты"),
+    ("Государственный язык Бразилии", "Португальский", "Испанский", "Английский", "Итальянский")
+]
+idx = 0
+correct_answer = ""
+
+def ask(question, right_answer, wrong1, wrong2, wrong3):
+    global correct_answer
+    correct_answer = right_answer
+    variants = [right_answer, wrong1, wrong2, wrong3]
+    shuffle(variants)
+    button1.setText(variants[0])
+    button2.setText(variants[1])
+    button3.setText(variants[2])
+    button4.setText(variants[3])
+    MAINtext.setText(question)
+    RadioGroupBox.show()
+    ansGroupBox.hide()
+    Otv_Button.setText("Ответить")
+    RadioGroup.setExclusive(False)
+    button1.setChecked(False)
+    button2.setChecked(False)
+    button3.setChecked(False)
+    button4.setChecked(False)
+    RadioGroup.setExclusive(True)
+
+def check_anw():
+    btn = RadioGroup.checkedButton()
+    if not btn:
+        return
+    if btn.text() == correct_answer:
+        show_correct("Правильно!")
+    else:
+        show_correct(f"Неверно! Правильный ответ: {correct_answer}")
+
+def show_correct(res):
+    winlabel.setText(res)
+    RadioGroupBox.hide()
+    ansGroupBox.show()
+    Otv_Button.setText("Следующий вопрос")
+
+def test_text():
+    global idx
+    if Otv_Button.text() == "Ответить":
+        check_anw()
+    else:
+        idx += 1
+        if idx >= len(questions):
+            idx = 0
+        ask(*questions[idx])
+
+Otv_Button.clicked.connect(test_text)
+ask(*questions[0])
+main_win.show()
+app.exec_()
