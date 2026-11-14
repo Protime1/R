@@ -54,41 +54,29 @@ liner.addWidget(ansGroupBox)
 liner.addWidget(Otv_Button)
 main_win.setLayout(liner)
 
-questions = [
-    ("Какой национальности не существует?", "Смурфы", "Энцы", "Чулымцы", "Алеуты"),
-    ("Государственный язык Бразилии", "Португальский", "Испанский", "Английский", "Итальянский")
-]
-idx = 0
-correct_answer = ""
+buttons = [button1, button2, button3, button4]
+answer = buttons
 
 def ask(question, right_answer, wrong1, wrong2, wrong3):
-    global correct_answer
-    correct_answer = right_answer
-    variants = [right_answer, wrong1, wrong2, wrong3]
-    shuffle(variants)
-    button1.setText(variants[0])
-    button2.setText(variants[1])
-    button3.setText(variants[2])
-    button4.setText(variants[3])
+    shuffle(buttons)
+    answer[0].setText(right_answer)
+    answer[1].setText(wrong1)
+    answer[2].setText(wrong2)
+    answer[3].setText(wrong3)
     MAINtext.setText(question)
     RadioGroupBox.show()
     ansGroupBox.hide()
     Otv_Button.setText("Ответить")
     RadioGroup.setExclusive(False)
-    button1.setChecked(False)
-    button2.setChecked(False)
-    button3.setChecked(False)
-    button4.setChecked(False)
+    for b in buttons:
+        b.setChecked(False)
     RadioGroup.setExclusive(True)
 
 def check_anw():
-    btn = RadioGroup.checkedButton()
-    if not btn:
-        return
-    if btn.text() == correct_answer:
+    if answer[0].isChecked():
         show_correct("Правильно!")
-    else:
-        show_correct(f"Неверно! Правильный ответ: {correct_answer}")
+    elif any(b.isChecked() for b in answer[1:]):
+        show_correct(f"Неверно! Правильный ответ: {answer[0].text()}")
 
 def show_correct(res):
     winlabel.setText(res)
@@ -96,17 +84,7 @@ def show_correct(res):
     ansGroupBox.show()
     Otv_Button.setText("Следующий вопрос")
 
-def test_text():
-    global idx
-    if Otv_Button.text() == "Ответить":
-        check_anw()
-    else:
-        idx += 1
-        if idx >= len(questions):
-            idx = 0
-        ask(*questions[idx])
-
-Otv_Button.clicked.connect(test_text)
-ask(*questions[0])
+ask("Государственный язык Бразилии", "Португальский", "Испанский", "Английский", "Итальянский")
+Otv_Button.clicked.connect(check_anw)
 main_win.show()
 app.exec_()
