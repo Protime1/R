@@ -56,6 +56,7 @@ main_win.setLayout(liner)
 
 buttons = [button1, button2, button3, button4]
 answer = buttons
+idx = 0
 
 def ask(question, right_answer, wrong1, wrong2, wrong3):
     shuffle(buttons)
@@ -75,7 +76,7 @@ def ask(question, right_answer, wrong1, wrong2, wrong3):
 def check_anw():
     if answer[0].isChecked():
         show_correct("Правильно!")
-    elif any(b.isChecked() for b in answer[1:]):
+    elif RadioGroup.checkedButton():
         show_correct(f"Неверно! Правильный ответ: {answer[0].text()}")
 
 def show_correct(res):
@@ -84,7 +85,21 @@ def show_correct(res):
     ansGroupBox.show()
     Otv_Button.setText("Следующий вопрос")
 
-ask("Государственный язык Бразилии", "Португальский", "Испанский", "Английский", "Итальянский")
-Otv_Button.clicked.connect(check_anw)
+def test_text():
+    global idx
+    if Otv_Button.text() == "Ответить":
+        check_anw()
+    else:
+        idx += 1
+        if idx == 1:
+            ask("Государственный язык Бразилии", "Португальский", "Испанский", "Английский", "Итальянский")
+        elif idx == 2:
+            ask("Столица Франции", "Париж", "Лион", "Марсель", "Ницца")
+        else:
+            idx = 0
+            ask("Какой национальности не существует?", "Смурфы", "Энцы", "Чулымцы", "Алеуты")
+
+ask("Какой национальности не существует?", "Смурфы", "Энцы", "Чулымцы", "Алеуты")
+Otv_Button.clicked.connect(test_text)
 main_win.show()
 app.exec_()
